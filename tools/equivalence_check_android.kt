@@ -366,17 +366,17 @@ fun compare(upFile: String, oursFile: String): Int {
             else -> { failures++; "FAIL" }
         }
         val mark = if (verdict == "FAIL")
-            "未预期的分歧: " + keys.filterNot { covered(it, scn.expectDiff) }.joinToString(", ")
-        else if (verdict == "PASS*") "已知并解释的分歧: " + keys.joinToString(", ")
+            "没打算不同却不同了: " + keys.filterNot { covered(it, scn.expectDiff) }.joinToString(", ")
+        else if (verdict == "PASS*") "刻意不同（下面逐条说明）: " + keys.joinToString(", ")
         else scn.note
         println(scn.name.padEnd(width) + verdict.padEnd(7) + mark)
         if (diffs.isNotEmpty()) details.add(Triple(scn.name, verdict, diffs))
     }
     println("-".repeat(width + 62))
     println("共 ${SCENARIOS.size} 个场景：${SCENARIOS.size - failures - expected} 完全一致，" +
-        "$expected 有已知分歧，$failures 失败")
+        "$expected 刻意不同，$failures 失败")
     if (details.isNotEmpty()) {
-        println("\n差异明细（键 / jev-chat-jarvis / 我们）:")
+        println("\n逐条对照（键 / jev-chat-jarvis / 我们）:")
         for ((name, verdict, diffs) in details) {
             println("\n  [$verdict] $name")
             diffs.forEach { println("    $it") }

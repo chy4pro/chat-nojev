@@ -527,10 +527,10 @@ def drive(python: str, upstream_tree: str, ours_tree: str) -> int:
         if not keys:
             verdict, mark = "PASS", ""
         elif all(covered(k, scn["expect_diff"]) for k in keys):
-            verdict, mark = "PASS*", "已知并解释的分歧: " + ", ".join(keys)
+            verdict, mark = "PASS*", "刻意不同（下面逐条说明）: " + ", ".join(keys)
             expected += 1
         else:
-            verdict, mark = "FAIL", "未预期的分歧: " + ", ".join(
+            verdict, mark = "FAIL", "没打算不同却不同了: " + ", ".join(
                 k for k in keys if not covered(k, scn["expect_diff"]))
             failures += 1
         print(name.ljust(width) + verdict.ljust(7) + (mark or scn["note"])[:110])
@@ -538,10 +538,13 @@ def drive(python: str, upstream_tree: str, ours_tree: str) -> int:
             details.append((name, verdict, cmp_["diffs"]))
     print("-" * (width + 66))
     print(f"共 {len(SCENARIOS)} 个场景：{len(SCENARIOS) - failures - expected} 完全一致，"
-          f"{expected} 有已知分歧，{failures} 失败")
+          f"{expected} 刻意不同，{failures} 失败")
+    if expected:
+        print("「刻意不同」不是没修好：这几处是 jev-chat-jarvis-mac 的判断层会悄悄替你填一个值，这一版不填。")
+        print("  理由逐条写在 macos/docs/EQUIVALENCE.md；要把它们变成「完全一致」，得把原版那几处一起抄过来。")
 
     if details:
-        print("\n差异明细（键 / jev-chat-jarvis-mac / 我们）:")
+        print("\n逐条对照（键 / jev-chat-jarvis-mac / 我们）:")
         for name, verdict, diffs in details:
             print(f"\n  [{verdict}] {name}")
             for d in diffs:

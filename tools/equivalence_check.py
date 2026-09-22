@@ -385,10 +385,10 @@ def drive(python: str, upstream_tree: str, ours_tree: str) -> int:
         if not keys:
             verdict, mark = "PASS", ""
         elif all(covered(k, scn["expect_diff"]) for k in keys):
-            verdict, mark = "PASS*", "已知并解释的分歧: " + ", ".join(keys)
+            verdict, mark = "PASS*", "刻意不同（下面逐条说明）: " + ", ".join(keys)
             expected += 1
         else:
-            verdict, mark = "FAIL", "未预期的分歧: " + ", ".join(
+            verdict, mark = "FAIL", "没打算不同却不同了: " + ", ".join(
                 k for k in keys if not covered(k, scn["expect_diff"]))
             failures += 1
         print(name.ljust(width) + verdict.ljust(7) + (mark or scn["note"]))
@@ -396,10 +396,10 @@ def drive(python: str, upstream_tree: str, ours_tree: str) -> int:
             details.append((name, verdict, cmp_["diffs"]))
     print("-" * (width + 60))
     print(f"共 {len(SCENARIOS)} 个场景：{len(SCENARIOS) - failures - expected} 完全一致，"
-          f"{expected} 有已知分歧，{failures} 失败")
+          f"{expected} 刻意不同，{failures} 失败")
 
     if details:
-        print("\n差异明细（键 / jev-chat-windows / 我们）:")
+        print("\n逐条对照（键 / jev-chat-windows / 我们）:")
         for name, verdict, diffs in details:
             print(f"\n  [{verdict}] {name}")
             for d in diffs:
