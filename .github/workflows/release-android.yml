@@ -3,10 +3,9 @@ name: release-android
 # GitHub 托管的 Linux runner 自带 Android SDK，所以 APK 在 CI 里打得出来
 # （开发容器里打不出来，那是容器没 SDK，不是工程的问题）。
 #
-# 签名：android/app/build.gradle.kts 里从 JEV_KEYSTORE_PROPS 指的 properties 文件读签名配置，
-# 默认值是一个写死的 Windows 路径（H:/…），在 Linux 上 file() 会把它当相对路径、必然不存在，
-# 于是 signingConfigs 为空、release 构建出来是未签名的 APK。这里不改那个 Gradle 文件，
-# 就用它本来就留着的 JEV_KEYSTORE_PROPS 这个口子：
+# 签名：android/app/build.gradle.kts 从 JEV_KEYSTORE_PROPS 指的 properties 文件读签名配置。
+# 不设这个变量就打未签名包——上游那里默认值是一个 Windows 路径，Gradle 在 Linux 上连解析
+# 都过不去(配置阶段就抛)，所以未签名根本打不出来；这个分支把默认值去掉了，不设即不签。
 #   * 配了 ANDROID_KEYSTORE_BASE64 等 secret  -> 现写一份 properties，签名
 #   * 没配                                    -> 照旧出未签名包，文件名带 -unsigned，Release 说明里写明
 on:
