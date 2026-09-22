@@ -39,7 +39,15 @@ jobs:
             android/gradle/wrapper/gradle-wrapper.properties
             android/**/*.gradle.kts
 
-      - uses: android-actions/setup-android@v3
+      # runner 镜像自带 Android SDK（ANDROID_HOME 已设好），不需要 setup-android：
+      # 那个 action 会去装早已从 SDK 仓库下架的 `tools` 包，找不到就整步失败。
+      - name: 确认 runner 自带的 SDK
+        run: |
+          set -euo pipefail
+          : "${ANDROID_HOME:?runner 上没有 ANDROID_HOME，这个镜像没预装 SDK}"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" || true
+          ls "$ANDROID_HOME/build-tools" || true
 
       - name: versionName 对一下 tag（只提醒，不拦）
         if: github.ref_type == 'tag'
