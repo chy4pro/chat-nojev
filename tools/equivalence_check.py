@@ -5,6 +5,10 @@
 上游的值来自两次 API（起草那次回一个 JSON 数组，Jev 那次回 {"answers": {...}}）；
 我们的值来自一次 API，回一个合并后的 JSON 对象。产出方换了，下游一个字都不该变。
 
+标准是「同一份值进去，同一份东西出来」：适配器只搬键，不校验、不夹范围、不归一，
+所以两边的线格式虽然不同，喂进去的**值**是同一份，出来的 dict 也就该逐键相同——
+包括标签不在题目里、分数超范围这种坏值（上游的判断模型一样会吐，下游本来就防着）。
+
 每个场景只写一份中立数据（候选、谁赢、每条的概率、7 个判断字段的值），
 由两个小函数分别渲染成两种线格式，再分别喂给两边的 analyze()。
 
@@ -81,8 +85,7 @@ def judgment(**overrides):
 
 
 def scenario(name, candidates, winner, probs, note="", *, judgment_values=None,
-             reply_to=None, messages=None, normalize_upstream=True, noul_bare=False,
-             expect_diff=()):
+             reply_to=None, messages=None, noul_bare=False, expect_diff=()):
     return {
         "name": name,
         "note": note,
@@ -92,9 +95,6 @@ def scenario(name, candidates, winner, probs, note="", *, judgment_values=None,
         "judgment": FULL_JUDGMENT if judgment_values is None else judgment_values,
         "reply_to": reply_to,
         "messages": list(messages or MESSAGES),
-        # Jev 的 API 按定义回一个归一化的分布；模型自己报的分不是。
-        # normalize_upstream=True 时，上游那份线数据也按归一后的分布渲染（见 REPORT）。
-        "normalize_upstream": normalize_upstream,
         "noul_bare": noul_bare,        # 我们这边的 noul 写成裸数字（模型常这么给）
         "expect_diff": tuple(expect_diff),  # 已知且有解释的分歧键
     }
@@ -141,17 +141,18 @@ SCENARIOS = [
              "上游 Jev 回答整块没有 best_reply；我们这边整块没有排序（best_reply + reply_scores 都缺）"),
     scenario("choice_names_missing_candidate", C2, "reply_c",
              {"reply_a": 0.40, "reply_b": 0.60},
-             "点名的候选下标不存在（只有两条却点 reply_c）",
-             expect_diff=("answers.best_reply.choice",)),
+             "点名的候选下标不存在（只有两条却点 reply_c）：两边都把标签原样递给 engine 去夹"),
     scenario("probabilities_not_normalized", C3, "reply_b",
              {"reply_a": 2.0, "reply_b": 5.0, "reply_c": 3.0},
-             "分加起来不是 1：上游那边按 Jev 的契约渲染成归一后的分布，我们这边喂原始分"),
-    scenario("probabilities_not_normalized_raw", C3, "reply_b",
-             {"reply_a": 2.0, "reply_b": 5.0, "reply_c": 3.0},
-             "同上，但上游那份也原样喂没归一的数——这是两边唯一真正分歧的地方",
-             normalize_upstream=False,
-             expect_diff=("scores", "answers.best_reply.confidence",
-                          "answers.best_reply.probabilities")),
+             "分加起来不是 1：两边都原样递下去，谁也不归一"),
+    scenario("values_outside_the_taxonomy", C3, "reply_b",
+             {"reply_a": 0.25, "reply_b": 0.55, "reply_c": 0.20},
+             "题目里没有的说法 + 超出 0..9 的分：两边都原样递下去，界面自己兜",
+             judgment_values=judgment(
+                 true_intent={"choice": "他想吃饭", "confidence": 0.4,
+                              "probabilities": {"他想吃饭": 0.4, "vent_anger": 0.6}},
+                 danger_level={"score": 11, "confidence": 0.3,
+                               "probabilities": {"9": 0.3}})),
     scenario("judgment_field_absent", C3, "reply_a",
              {"reply_a": 0.5, "reply_b": 0.3, "reply_c": 0.2},
              "两边都缺同一个判断字段（best_action）",
@@ -170,20 +171,8 @@ SCENARIOS = [
              judgment_values=judgment(
                  true_intent={"choice": "vent_anger",
                               "probabilities": {"vent_anger": 0.62, "casual_chat": 0.38}},
-                 danger_level={"score": 4, "probabilities": {"4": 0.7, "5": 0.3}}),
-             expect_diff=("answers.true_intent.confidence", "answers.danger_level.confidence")),
+                 danger_level={"score": 4, "probabilities": {"4": 0.7, "5": 0.3}})),
 ]
-
-
-def _normalized(probs):
-    """跟 core/draft.py 的 _ranking 同一条规则：和不是 1 就按和摊平。"""
-    if not probs:
-        return {}
-    clipped = {k: max(0.0, v) for k, v in probs.items()}
-    total = sum(clipped.values())
-    if total > 0 and abs(total - 1.0) > 1e-6:
-        return {k: v / total for k, v in clipped.items()}
-    return clipped
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +196,7 @@ def render_upstream(scn) -> dict:
                              "probabilities": dict(spec["probabilities"])}
     if scn["winner"] is None and scn["probs"] is None:
         return answers  # 整块 best_reply 都没有
-    probs = scn["probs"] or {}
-    probs = _normalized(probs) if scn["normalize_upstream"] else dict(probs)
+    probs = dict(scn["probs"] or {})
     block = {"type": "choice"}
     if scn["winner"] is not None:
         block["choice"] = scn["winner"]

@@ -266,14 +266,26 @@ SCORE_MAX: dict = {name: len(q["criteria"]) - 1
 
 # 每种题型要模型回什么形状。判断结果最后要长成上游判断模型那三种答案的样子
 # （noul / choice / score），所以这里问的字段跟那三种一一对应。
+# choice 那几道题跟上游不一样：上游是判断模型从固定标签里挑一个，界面再按一张表把英文 key
+# 翻成中文显示；这一版换成通用模型，它能直接写出要显示的那句话，所以下面的 key 只用来把选项
+# 说清楚，答案要的是一句短语，用对话那门语言写（界面原样显示，app/overlay.py 不再有对照表）。
 _SHAPE = {
     "noul": '{{"noul": <number 0..1 = probability that the "true" description below fits>}}',
-    "choice": ('{{"choice": "<exactly one of the labels below>", "confidence": <number 0..1>, '
-               '"probabilities": {{"<label>": <number 0..1>, ...}}}}  '
-               "(one entry per label, values summing to 1)"),
+    "choice": ('{{"choice": "<the option you pick, as a short phrase in the language of the '
+               'conversation>", "confidence": <number 0..1>, '
+               '"probabilities": {{"<option, phrased the same way>": <number 0..1>, ...}}}}  '
+               "(one entry per option you weighed, values summing to 1)"),
     "score": ('{{"score": <integer {lo}..{hi}>, "confidence": <number 0..1>, '
               '"probabilities": {{"<level {lo}..{hi} as a string>": <number 0..1>, ...}}}}'),
 }
+
+# choice 那几道题的答题说明，三道题共用一份（true_intent / best_action / she_needs）。
+_CHOICE_ANSWER = (
+    "The option keys above are English so the descriptions can be precise; they are not what "
+    "you answer with. Answer with a short phrase naming the option you picked, written in the "
+    "language of the conversation. If none of the options fits, write your own short phrase in "
+    "that same language. Never answer with the English key."
+)
 
 
 def _criteria_lines(question: dict) -> str:
@@ -290,8 +302,11 @@ def render_judgment_spec(questions: dict = JUDGE_QUESTIONS) -> str:
     for name, q in questions.items():
         kind = q["type"]
         shape = _SHAPE[kind].format(lo=0, hi=len(q["criteria"]) - 1 if kind == "score" else 0)
-        blocks.append(f"### {name}\nAnswer shape: {shape}\n{q['instructions']}\n"
-                      f"{_criteria_lines(q)}")
+        block = (f"### {name}\nAnswer shape: {shape}\n{q['instructions']}\n"
+                 f"{_criteria_lines(q)}")
+        if kind == "choice":
+            block += "\n" + _CHOICE_ANSWER
+        blocks.append(block)
     blocks.append(
         f"### best_reply\nAnswer shape: the top-level \"best_reply\" and \"reply_scores\" "
         f"fields described below, keyed {', '.join(REPLY_KEYS)} in the same order as \"replies\".\n"
@@ -311,6 +326,8 @@ if __name__ == "__main__":
     assert "confirm_you_care: They are testing whether you remember" in spec
     assert "  9: Active rupture" in spec and "  0: Light chat or joking" in spec
     assert "integer 0..9" in spec
+    # choice 那三道题各带一份「用对话那门语言写一句短语」的说明，别的题型不带
+    assert spec.count("Never answer with the English key.") == len(CHOICE_LABELS) == 3
     assert RANK_INSTRUCTIONS.split(".")[0] in spec
     state = build_state([("her", "在吗"), ("me", "在", None)], "friends")
     assert state["chat"]["latest_from"] == "me" and state["chat"]["is_group"] is False

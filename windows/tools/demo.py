@@ -70,7 +70,8 @@ def main() -> int:
     if u:
         print(f"\nusage: in={u.get('input_tokens')} out={u.get('output_tokens')} "
               f"cost=${u.get('cost')}")
-    print("\n期望核对: true_intent≈confirm_you_care, best_action≈check_history, danger_level 中高档")
+    print("\n期望核对: true_intent≈希望确认你在意, best_action≈先核对聊天记录, danger_level 中高档"
+          "（choice 那三道题答的是模型自己写的短语，用对话那门语言，不是英文 key）")
     return 0
 
 

@@ -7,7 +7,12 @@ key 只从环境变量读（就这一把，LLM_API_KEY）、绝不把 key 打进
 上游是两次调用：这里盲起草三条，再把对话和三条候选发给判断模型（TypeSafe Jev），由它答题并排序。
 这一版把题目原文铺进同一个提示词，让写候选的模型顺手把判断和排序一起吐出来——
 **判断和排序的产出方换了，形状没换**：engine 和悬浮窗拿到的还是原来那几个字段。
-风险全在解析这一侧，所以下面的解析器一律「读不出来就整条丢掉」，绝不把没见过的标签递下去。
+下面那段适配只做翻译：把模型给的值搬到 engine / 悬浮窗认识的键下面，值本身原样递下去。
+不查标签表、不夹范围、不归一——上游的判断模型也会吐垃圾，所以下游本来就防着这一手：
+悬浮窗查不到标签就显示模型自己的说法、紧张度不是 0..9 的数就显示「紧张度待判断」，
+engine 认不出 best_reply.choice 就退第一条。在适配这一层再校验一遍，只会让同一份坏值
+在我们这儿的表现跟上游不一样（上游给 11 分显示「待判断」，夹成 9 就成了「紧张度 9/9」）。
+模型整条没给的字段就不出现，跟上游判断模型没答这题是一个效果——但绝不替它编一个值。
 """
 from __future__ import annotations
 
@@ -18,14 +23,14 @@ try:  # 当模块导入 / 当脚本直接跑 都能用
     from .errors import JevError, _api_key  # 复用 key 读取
     from .llm import JSON_MODE_PROTOCOLS, chat
     from .providers import DRAFT_PROVIDERS, LLM_ENV
-    from .questions import (CHOICE_LABELS, JUDGE_QUESTIONS, REPLY_KEYS, SCORE_MAX,
-                            build_state, render_judgment_spec)
+    from .questions import (JUDGE_QUESTIONS, REPLY_KEYS, build_state,
+                            render_judgment_spec)
 except ImportError:
     from errors import JevError, _api_key
     from llm import JSON_MODE_PROTOCOLS, chat
     from providers import DRAFT_PROVIDERS, LLM_ENV
-    from questions import (CHOICE_LABELS, JUDGE_QUESTIONS, REPLY_KEYS, SCORE_MAX,
-                           build_state, render_judgment_spec)
+    from questions import (JUDGE_QUESTIONS, REPLY_KEYS, build_state,
+                           render_judgment_spec)
 
 # 思考模式：V4.1 Flash 默认**开着**（effort=high，max_tokens 64K）——起草三句聊天回复用不上，慢还贵，
 # 默认一律关；设置里开了才让模型先想再写（draft_and_judge 的 thinking 参数，各家的额外字段在表里）。
@@ -60,9 +65,9 @@ _OUTPUT_CONTRACT = (
     "它们依次对应 replies 里的第 1、2、3 条。\n"
     '- "reply_scores"：对象，键就是上面那三个，值是 0 到 1 之间的小数，三个加起来等于 1；'
     "值越大表示这条越该发出去。\n"
-    '- "judgment"：对象，下面 7 个字段各给一条。字段名、可选标签、分数档位必须一字不差照抄下面的说明，'
-    "不要自己发明标签，也不要翻译成中文；哪一条你判断不出来就把那一条整个省掉，"
-    "不要填 null、不要瞎猜。\n"
+    '- "judgment"：对象，下面 7 个字段各给一条。字段名和分数档位必须一字不差照抄下面的说明；'
+    "choice 那几道题答的是一句短语（按下面的说明，用对话那门语言写），不是英文 key；"
+    "哪一条你判断不出来就把那一条整个省掉，不要填 null、不要瞎猜。\n"
     "所有字符串用双引号，不要有尾逗号，不要写注释。"
 )
 
@@ -185,9 +190,9 @@ def _line(m) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 合并那一次调用的解析：对象 → 候选 / 判断 / 排序。
-# 这一段是整份文件唯一新增的非平凡逻辑，也是最容易坏的地方，所以每一层都只做一件事，
-# 读不出来就返回 None / 空，让上层按「这一条没有」处理，绝不抛给用户。
+# 合并那一次调用：对象 → 候选 / 判断 / 排序。
+# 只干两件事——把 JSON 从回答里抠出来（解析），把值搬到下游认识的键下面（翻译）。
+# 不做校验：值合不合法由 engine 和悬浮窗判断，它们本来就得防着上游那个判断模型。
 # ---------------------------------------------------------------------------
 
 def _json_object(content: str) -> dict:
@@ -228,76 +233,45 @@ def _replies(obj: dict, content: str) -> list[str]:
     return _parse_candidates(content)
 
 
-def _num(value, lo: float | None = None, hi: float | None = None) -> float | None:
-    """数字才认（"0.7" 这种字符串也认）；true/false 不是数字，由调用方自己处理。
-    给了范围就夹进范围——超范围是模型没看清档位，不是理由把整条判断丢掉。"""
+def _num(value) -> float | None:
+    """数字才认（"2" 这种字符串也认）；true/false 不是数字。
+    只在需要拿下标的地方用（模型把 best_reply 写成序号），判断的值一律原样递下去，不过这一手。"""
     if value is None or isinstance(value, bool):
         return None
     try:
-        x = float(value)
+        return float(value)
     except (TypeError, ValueError):
         return None
-    if x != x or x in (float("inf"), float("-inf")):  # NaN / inf
-        return None
-    if lo is not None:
-        x = max(lo, min(hi, x))
-    return float(x)  # 夹范围时 min/max 会把边界那个 int 还回来，统一成 float
-
-
-def _probabilities(raw, keys) -> dict:
-    """概率表：只留认识的键、认得出的数字，其余一律不要。"""
-    if not isinstance(raw, dict):
-        return {}
-    out = {}
-    for key in keys:
-        value = _num(raw.get(key, raw.get(str(key))), 0, 1)
-        if value is not None:
-            out[str(key)] = value
-    return out
-
-
-def _confidence(raw: dict, probabilities: dict, choice: str | None) -> dict:
-    """confidence / probabilities 这两样是**模型自己报的自评**，不是上游判断模型那种
-    校准过的概率——同一个模型写了候选又给自己打分，数值只能当它的语气看，别当概率用。
-    模型没给数字就退回它自己给这一档的概率；两样都没有就不填，绝不替它编一个。"""
-    value = _num(raw.get("confidence"), 0, 1)
-    if value is None and choice is not None:
-        value = probabilities.get(str(choice))
-    return {"confidence": value} if value is not None else {}
 
 
 def _answer(name: str, raw) -> dict | None:
-    """一条判断 → 上游判断模型那三种答案形状之一。认不出来返回 None（整条不进 answers）。"""
+    """一条判断 → 上游判断模型那三种答案形状之一（noul / choice / score）。
+
+    只搬键，不动值：标签不查表、分数不夹范围、概率表原样带过去。模型给的是什么就递什么，
+    界面和 engine 自己会兜（app/overlay.py 查不到标签、紧张度不是 0..9 的数都有退路）。
+    那一条整个没给才返回 None——跟上游判断模型没答这题一个效果，绝不替它编一个。
+
+    confidence / probabilities 这两样是**模型自己报的自评**，不是上游判断模型那种
+    校准过的概率——同一个模型写了候选又给自己打分，数值只能当它的语气看，别当概率用。
+    """
     kind = JUDGE_QUESTIONS[name]["type"]
     if kind == "noul":
-        value = raw.get("noul") if isinstance(raw, dict) else raw
+        value = raw.get("noul") if isinstance(raw, dict) else raw  # 裸数字和 {"noul": x} 两种写法
         if isinstance(value, bool):  # 模型常常直接给 true/false，当成 1 / 0 的概率
             value = 1.0 if value else 0.0
-        else:
-            value = _num(value, 0, 1)
         return None if value is None else {"type": "noul", "noul": value}
-    if kind == "choice":
-        labels = CHOICE_LABELS[name]
-        raw = raw if isinstance(raw, dict) else {"choice": raw}
-        choice = raw.get("choice")
-        choice = choice.strip() if isinstance(choice, str) else None
-        if choice not in labels:
-            return None  # 不是题目里那几个标签就整条丢掉：界面没见过的标签一律不往下递
-        probabilities = _probabilities(raw.get("probabilities"), labels)
-        return {"type": "choice", "choice": choice,
-                **_confidence(raw, probabilities, choice), "probabilities": probabilities}
-    hi = SCORE_MAX[name]
-    raw = raw if isinstance(raw, dict) else {"score": raw}
-    score = _num(raw.get("score"), 0, hi)  # 超出 0..hi 就夹回来
-    if score is None:
+    field = "choice" if kind == "choice" else "score"
+    raw = raw if isinstance(raw, dict) else {field: raw}  # 裸值也认，跟 noul 一个道理
+    if raw.get(field) is None:
         return None
-    probabilities = _probabilities(raw.get("probabilities"), range(hi + 1))
-    return {"type": "score", "score": score,
-            **_confidence(raw, probabilities, int(score)), "probabilities": probabilities}
+    return {"type": kind, field: raw[field],
+            **({"confidence": raw["confidence"]} if raw.get("confidence") is not None else {}),
+            **({"probabilities": raw["probabilities"]}
+               if raw.get("probabilities") is not None else {})}
 
 
 def _judgment(obj: dict) -> dict:
-    """judgment 那一坨 → answers。缺的、坏的直接不出现，跟上游判断模型没答这题是一个效果。"""
+    """judgment 那一坨 → answers。模型没给的字段就不出现，跟上游判断模型没答这题是一个效果。"""
     raw = obj.get("judgment")
     if not isinstance(raw, dict):
         raw = obj  # 有的模型不套 judgment，把 7 个字段直接摊在顶层
@@ -321,16 +295,31 @@ def _named_best(obj: dict, texts: list[str]) -> str | None:
         if cleaned in texts:
             return cleaned
         value = value if value.isdigit() else None
-    index = _num(value, 0, 2)
-    return texts[int(index)] if index is not None and int(index) < len(texts) else None
+    index = _num(value)
+    # 先按 float 判范围再 int()：NaN / inf 比较一律为 False，int(NaN) 会炸
+    return texts[int(index)] if index is not None and 0 <= index < len(texts) else None
 
 
-def _ranking(best_text: str | None, by_text: dict, candidates: list[str]) -> dict | None:
+def _best_key(obj: dict, best_text: str | None, candidates: list[str]) -> str | None:
+    """模型点的那条 → engine 认识的 reply_x。
+
+    候选在出口被去重、过滤过，位置可能跟模型写的 reply_a/b/c 对不上，所以先按原文重新定位；
+    定不到（点名那条被滤掉了，或者它点了个根本不存在的下标）就把模型写的那个标签原样递下去——
+    engine 的 _REPLY_IDX.get(key, 0) 本来就防着认不出的标签，上游递给它的也是判断模型的原话。
+    非字符串（模型写了个数字又对不上任何候选）没法当标签，这一条就不填。
+    """
+    if best_text is not None and best_text in candidates[:len(REPLY_KEYS)]:
+        return REPLY_KEYS[candidates.index(best_text)]
+    value = obj.get("best_reply")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _ranking(choice: str | None, by_text: dict, candidates: list[str]) -> dict | None:
     """模型点的名 + 每条的分 → engine 认识的 best_reply 答案。
 
     by_text 是「候选原文 → 模型给的分」；候选在这之前被去重、过滤过，位置可能跟模型给的
-    reply_a/b/c 对不上，所以一律按原文重新映射到最终列表的位置上去。
-    分加起来不是 1 就归一化（只在活下来的候选之间分配）。
+    reply_a/b/c 对不上，所以一律按原文重新映射到最终列表的位置上去（这是对齐，不是校验）。
+    分本身原样带过去：不归一、不夹范围——engine 取不出数会按 0 处理，界面只拿它排序。
     点名和最高分打架时**以点名为准**——上游就是这么做的：engine 只认 choice，
     界面把 choice 那条强制排第一，分只用来给其余几条排序。
     """
@@ -338,20 +327,14 @@ def _ranking(best_text: str | None, by_text: dict, candidates: list[str]) -> dic
     for index, text in enumerate(candidates[:len(REPLY_KEYS)]):
         value = by_text.get(text)
         if value is not None:
-            probabilities[REPLY_KEYS[index]] = max(0.0, value)  # 负分当 0，别把比例弄反
-    total = sum(probabilities.values())
-    if total > 0 and abs(total - 1.0) > 1e-6:
-        # 模型爱给 0~10、或者三条各 0.9 这种。比例是有意义的，绝对值不是，所以按和归一。
-        # 全 0 就让它保持全 0：界面看到分全是假值会自己把百分比藏起来，跟上游收到垃圾时一样。
-        probabilities = {k: v / total for k, v in probabilities.items()}
-    choice = None
-    if best_text is not None and best_text in candidates[:len(REPLY_KEYS)]:
-        choice = REPLY_KEYS[candidates.index(best_text)]
+            probabilities[REPLY_KEYS[index]] = value
     if choice is None and not probabilities:
         return None  # 排序整块都没读出来 → engine 退第一条、分全 0，跟上游收到垃圾时一样
-    # choice 读不出来但分还在：engine 照样退第一条，百分比留着给界面用
-    return {"type": "choice", **({"choice": choice} if choice else {}),
-            **_confidence({}, probabilities, choice), "probabilities": probabilities}
+    # confidence 在上游那道 choice 题里就是「选中那一档的概率」，这里就是模型给中选那条的分，
+    # 不是新编的数；模型没给那条分就不填。choice 读不出来但分还在：engine 照样退第一条。
+    return {"type": "choice", **({"choice": choice} if choice is not None else {}),
+            **({"confidence": probabilities[choice]} if choice in probabilities else {}),
+            "probabilities": probabilities}
 
 
 def draft_and_judge(messages: list, relationship: str, provider: str = "deepseek",
@@ -415,8 +398,8 @@ def draft_and_judge(messages: list, relationship: str, provider: str = "deepseek
     texts = _replies(obj, content)  # 一条都没有会抛 JevError，跟上游一样
     answers = _judgment(obj)
     best_text = _named_best(obj, texts)
-    # 不夹范围：模型给 0~10 或者没归一的分都照收，比例留着给 _ranking 归一
-    by_text = {text: _num((obj.get("reply_scores") or {}).get(key_))
+    # 分原样收：模型爱给 0~10、也可能给个字符串，都不动它——engine 自己 float() 并兜 except
+    by_text = {text: (obj.get("reply_scores") or {}).get(key_)
                for text, key_ in zip(texts, REPLY_KEYS)}
     her_recent = _her_recent(messages)
     cands = _sanitize(texts, suspects, her_recent)
@@ -434,12 +417,13 @@ def draft_and_judge(messages: list, relationship: str, provider: str = "deepseek
             extra = _replies(extra_obj, more)
         except JevError:
             extra_obj, extra = {}, []
-        # 补上来的分跟第一次那批不是同一次打的，凑在一起不成分布，最后归一化时一并摊平
-        by_text.update({text: _num((extra_obj.get("reply_scores") or {}).get(key_))
+        # 补上来的分跟第一次那批不是同一次打的，凑在一起不成分布——照样原样递下去，
+        # 上游收到的分也不保证成分布，界面只拿它给候选排序
+        by_text.update({text: (extra_obj.get("reply_scores") or {}).get(key_)
                         for text, key_ in zip(extra, REPLY_KEYS)})
         cands = _sanitize(cands + extra, suspects, her_recent)
     cands = cands[:3]  # 可能仍不足 3 条，下游按实际条数处理
-    ranking = _ranking(best_text, by_text, cands)
+    ranking = _ranking(_best_key(obj, best_text, cands), by_text, cands)
     if ranking is not None:
         answers["best_reply"] = ranking
     return {"candidates": cands, "answers": answers, "usage": {}}
@@ -495,29 +479,35 @@ if __name__ == "__main__":
     assert ans["should_reply_now"] == {"type": "noul", "noul": 0.0}  # true/false 当 1/0
     assert ans["true_intent"] == {"type": "choice", "choice": "confirm_you_care", "confidence": 0.8,
                                   "probabilities": {"confirm_you_care": 0.8, "vent_anger": 0.2}}
-    assert ans["danger_level"] == {"type": "score", "score": 6.0, "confidence": 0.5,
+    assert ans["danger_level"] == {"type": "score", "score": 6, "confidence": 0.5,
                                    "probabilities": {"6": 0.5, "7": 0.5}}
-    # 没给 confidence 就退回它自己给那一档的概率；连概率都没有就不填这个键
-    assert ans["best_action"] == {"type": "choice", "choice": "check_history", "probabilities": {}}
+    # 没给 confidence 就不填这个键，也不从概率表里替它编一个
+    assert ans["best_action"] == {"type": "choice", "choice": "check_history"}
     assert _named_best(obj, ["甲", "乙", "丙"]) == "乙"
-    assert _ranking("乙", {"甲": 0.2, "乙": 0.7, "丙": 0.1}, ["甲", "乙", "丙"])["choice"] == "reply_b"
-    # 候选被过滤掉一条：分按原文重新映射到新位置，并且归一化
-    got = _ranking("乙", {"甲": 0.2, "乙": 0.6}, ["甲", "乙"])
-    assert got["choice"] == "reply_b" and abs(sum(got["probabilities"].values()) - 1) < 1e-9
-    assert abs(got["probabilities"]["reply_a"] - 0.25) < 1e-9
-    # 没归一的分（模型爱给 0~10）：比例保住
-    got = _ranking("乙", {"甲": 2, "乙": 6, "丙": 2}, ["甲", "乙", "丙"])
-    assert abs(got["probabilities"]["reply_b"] - 0.6) < 1e-9
-    # 点名的那条被过滤掉了 → 不给 choice（engine 退第一条），分还留着
-    assert "choice" not in _ranking("丙", {"甲": 0.5}, ["甲"])
+    assert _best_key(obj, "乙", ["甲", "乙", "丙"]) == "reply_b"
+    got = _ranking("reply_b", {"甲": 0.2, "乙": 0.7, "丙": 0.1}, ["甲", "乙", "丙"])
+    assert got["choice"] == "reply_b" and got["confidence"] == 0.7
+    # 候选被过滤掉一条：分按原文重新映射到新位置，值一个都不动
+    got = _ranking(_best_key(obj, "乙", ["甲", "乙"]), {"甲": 0.2, "乙": 0.6}, ["甲", "乙"])
+    assert got["choice"] == "reply_b" and got["probabilities"] == {"reply_a": 0.2, "reply_b": 0.6}
+    # 没归一的分（模型爱给 0~10）：原样递下去，不归一
+    got = _ranking("reply_b", {"甲": 2, "乙": 6, "丙": 2}, ["甲", "乙", "丙"])
+    assert got["probabilities"] == {"reply_a": 2, "reply_b": 6, "reply_c": 2}
+    # 点名的那条被过滤掉了 / 点了个不存在的下标：标签原样递下去，engine 自己去夹
+    assert _best_key({"best_reply": "reply_a"}, "甲", ["乙"]) == "reply_a"
+    assert _best_key({"best_reply": "reply_c"}, None, ["甲", "乙"]) == "reply_c"
+    assert _ranking("reply_c", {"甲": 0.5}, ["甲"]) == {
+        "type": "choice", "choice": "reply_c", "probabilities": {"reply_a": 0.5}}
     assert _ranking(None, {}, ["甲"]) is None  # 排序整块没读出来
-    # 标签不在题目里 / 分数超范围 / 字段根本没给
+    # 标签不在题目里 / 分数超范围 / 分数不是数字：一律原样递下去（界面自己会显示「待判断」）
     bad = _judgment({"judgment": {"true_intent": {"choice": "他想吃饭"},
                                   "danger_level": {"score": 42},
                                   "she_needs": {"choice": "nothing"}}})
-    assert "true_intent" not in bad and "best_action" not in bad
-    assert bad["danger_level"]["score"] == 9.0  # 夹回档位上限
+    assert bad["true_intent"] == {"type": "choice", "choice": "他想吃饭"}
+    assert bad["danger_level"] == {"type": "score", "score": 42}
+    assert "best_action" not in bad  # 字段根本没给才不出现
     assert bad["she_needs"]["choice"] == "nothing"
+    assert _judgment({"danger_level": {"score": "很高"}})["danger_level"]["score"] == "很高"
     # 截断：JSON 废了，但前面几条完整的候选还能抢出来
     cut = '{"replies": ["好啊", "行，等我", "这就'
     assert _json_object(cut) == {} and _replies({}, cut) == ["好啊", "行，等我"]

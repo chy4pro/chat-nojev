@@ -5,12 +5,21 @@ This repository is a derivative work. It takes the Jev 聊天助手 (Jev Chat
 Assistant) conversation copilot and replaces its separate judgment model
 (TypeSafe Jev) with a single call to an ordinary LLM: the same model that
 drafts the candidate replies also answers the judgment questions, picks the
-best candidate and scores the others. The question set, the option labels and
-the 0-9 tension criteria are carried over unchanged from upstream; only the
-producer of those values differs. Because one model now both writes and rates
-the candidates, the `confidence` and `probabilities` values it returns are the
-model's own self-report and are not calibrated the way the upstream judgment
-model's were.
+best candidate and scores the others. The question set, the option keys and
+their descriptions, and the 0-9 tension criteria are carried over unchanged
+from upstream; only the producer of those values differs. Because one model now
+both writes and rates the candidates, the `confidence` and `probabilities`
+values it returns are the model's own self-report and are not calibrated the
+way the upstream judgment model's were.
+
+Two things beyond the producer differ. The three choice questions are answered
+with a short phrase in the language of the conversation instead of one of the
+fixed English keys, because a general model does not need a closed label set
+the way a classifier does; the keys and descriptions still frame the questions,
+but `app/overlay.py`'s table translating those keys into fixed Chinese display
+text (`_CHOICES`) has been removed and the panel shows the model's own wording.
+And the settings page has one model section instead of two, the judgment
+provider having no counterpart here.
 
 Everything else in `windows/` is the upstream Windows application.
 

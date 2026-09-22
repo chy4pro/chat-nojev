@@ -46,8 +46,8 @@ _RESULT = {
     "answers": {
         "literal_question": {"type": "noul", "noul": 0.98},
         "true_intent": {
-            "type": "choice", "choice": "casual_chat", "confidence": 0.86,
-            "probabilities": {"request_action": 0.1, "casual_chat": 0.86, "close_topic": 0.04},
+            "type": "choice", "choice": "轻松交流", "confidence": 0.86,
+            "probabilities": {"希望你采取行动": 0.1, "轻松交流": 0.86, "平和结束话题": 0.04},
         },
         "danger_level": {
             "type": "score", "score": 0.0, "confidence": 0.9,
@@ -55,12 +55,12 @@ _RESULT = {
         },
         "should_reply_now": {"type": "noul", "noul": 0.96},
         "best_action": {
-            "type": "choice", "choice": "make_plan", "confidence": 0.82,
-            "probabilities": {"give_commitment": 0.06, "acknowledge": 0.12, "make_plan": 0.82},
+            "type": "choice", "choice": "商量具体安排", "confidence": 0.82,
+            "probabilities": {"给出具体承诺": 0.06, "回应并表达理解": 0.12, "商量具体安排": 0.82},
         },
         "she_needs": {
-            "type": "choice", "choice": "action", "confidence": 0.74,
-            "probabilities": {"action": 0.74, "care": 0.16, "nothing": 0.1},
+            "type": "choice", "choice": "具体行动或安排", "confidence": 0.74,
+            "probabilities": {"具体行动或安排": 0.74, "关注与在意": 0.16, "无需补充回应": 0.1},
         },
         "tension_resolved": {"type": "noul", "noul": 0.99},
         "best_reply": {
