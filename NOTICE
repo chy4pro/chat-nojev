@@ -1,1 +1,60 @@
-Placeholder. The upstream copyright lines from each jev-chat repository will be reproduced here verbatim once the sources are merged in, as the MIT licence requires.
+chat-nojev
+==========
+
+This repository is a derivative work. It takes the Jev 聊天助手 (Jev Chat
+Assistant) conversation copilot and replaces its separate judgment model
+(TypeSafe Jev) with a single call to an ordinary LLM: the same model that
+drafts the candidate replies also answers the judgment questions, picks the
+best candidate and scores the others. The question set, the option labels and
+the 0-9 tension criteria are carried over unchanged from upstream; only the
+producer of those values differs. Because one model now both writes and rates
+the candidates, the `confidence` and `probabilities` values it returns are the
+model's own self-report and are not calibrated the way the upstream judgment
+model's were.
+
+Everything else in `windows/` is the upstream Windows application.
+
+Upstream copyright notices
+--------------------------
+
+Reproduced verbatim from the LICENSE file of each upstream repository, as the
+MIT licence requires.
+
+From https://github.com/jev-chat/jev-chat-jarvis (Jev 聊天助手, Android — the
+original; the question set and judgment taxonomy originate here):
+
+    MIT License
+
+    Copyright (c) 2026 Finderchangchang and the jev-chat contributors
+
+From https://github.com/jev-chat/jev-chat-windows (Jev 聊天助手 Windows 版 —
+the direct source of `windows/`):
+
+    MIT License
+
+    Copyright (c) 2026 rezoch340 and the jev-chat contributors
+    Portions Copyright (c) 2026 Finderchangchang and the jev-chat contributors (Jev 聊天助手, https://github.com/jev-chat/jev-chat-jarvis)
+
+From the macOS sister project (jev-chat-jarvis-mac):
+
+    MIT License
+
+    Copyright (c) 2026 eatmoreduck
+
+Each of those projects is MIT licensed. The full permission notice and
+warranty disclaimer, carrying the first two copyright lines above, are in
+`windows/LICENSE`, copied verbatim from jev-chat-windows. (This repository has
+no LICENSE file of its own yet, although README.md points at one.)
+
+Terms inherited from upstream
+-----------------------------
+
+- LICENSE and the NOTICE files must be kept when this software or a derivative
+  is distributed, and the source must be credited, e.g. "Based on
+  jev-chat-windows (https://github.com/jev-chat/jev-chat-windows)".
+- Do not use the names "jev-chat-windows", "Jev 聊天助手", "jev-chat" or the
+  chatjevs.com domain in a way that implies endorsement by the original
+  authors. This repository is not affiliated with them.
+- `windows/NOTICE` carries the upstream third-party component list, including
+  the PySide6-Fluent-Widgets GPLv3 terms that bind any built Windows release
+  package. Those terms are unchanged here.
