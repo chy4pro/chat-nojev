@@ -27,7 +27,9 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.jev.probe"
+        // 和上游同一个 id 的话，两个应用在手机上只能装一个，而且签名不同时互相覆盖不了。
+        // 这个分支用自己的 id，可以和上游那个并排装、来回比。代码包名(namespace)不动。
+        applicationId = "com.jev.probe.nojev"
         minSdk = 30
         targetSdk = 35
         versionCode = 1

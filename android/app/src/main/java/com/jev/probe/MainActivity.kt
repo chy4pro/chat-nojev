@@ -27,8 +27,10 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var prefs: Prefs
     private lateinit var container: LinearLayout
-    private val a11yComponent =
-        "com.jev.probe/com.google.android.accessibility.selecttospeak.SelectToSpeakService"
+    // 组件名的前半段是 applicationId，不是代码包名——这个分支把 applicationId 改成了
+    // 自己的（好和上游那个应用并存），所以从 packageName 取，不能写死。
+    private val a11yComponent
+        get() = "$packageName/com.google.android.accessibility.selecttospeak.SelectToSpeakService"
 
     private val accent = Color.parseColor("#3A7AFE")
     private val green = Color.parseColor("#16A34A")
