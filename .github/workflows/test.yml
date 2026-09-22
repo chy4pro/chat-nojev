@@ -116,7 +116,7 @@ jobs:
           for p in "jdk/jdk-17/bin/java" \
                    "kotlinc/kotlinc/bin/kotlinc" \
                    "kotlinc/kotlinc/lib/kotlin-stdlib.jar" \
-                   "org.json.jar" \; do
+                   "org.json.jar"; do
             [ -e "$PROBE/$p" ] || { echo "::error::probe 少了 $p"; exit 1; }
           done
           echo "probe ok: $PROBE"
