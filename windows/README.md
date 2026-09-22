@@ -3,11 +3,11 @@
 微信（Windows 4.x）旁挂的回复辅助：本地 OCR 读屏上的对话 → 一次模型调用同时给出判断和 3 条候选回复 →
 一键填入微信输入框。**发送永远手动，程序不替你按发送。**
 
-> **这一份是 chat-nojev 的改版。** 上游（[jev-chat-windows](https://github.com/jev-chat/jev-chat-windows)）
-> 把判断和排序交给专门的判断模型（TypeSafe Jev），起草另算一次调用；这里把两次合成一次——
+> **这一份是 chat-nojev 的改版，脱胎自 [jev-chat-windows](https://github.com/jev-chat/jev-chat-windows)。**
+> 它把判断和排序交给专门的判断模型（TypeSafe Jev），起草另算一次调用；这里把两次合成一次——
 > 同一个语言模型写候选、答那 7 道判断题、并点名哪条最好。题目原文、选项集合、0–9 的紧张度档位
 > 一个字没改（见 `core/questions.py`），界面读到的字段也一模一样，**只是产出方换了**。
-> 因此 `confidence` / `probabilities` 现在是模型的自评，不是上游那种校准过的概率。
+> 因此 `confidence` / `probabilities` 现在是模型的自评，不是它那种校准过的概率。
 > 配置上少了一把 key：全程只有 `LLM_API_KEY`。
 
 采集这一侧来自安卓版 [Finderchangchang/jev-chat-JARVIS](https://github.com/Finderchangchang/jev-chat-JARVIS)
@@ -17,9 +17,9 @@
 
 **普通使用直接下载，不用装 Python、不用碰源码。** 后面的「源码运行」是给开发者的。
 
-👉 **[下载最新版](https://github.com/jev-chat/jev-chat-windows/releases/latest)**
+👉 **[下载 chat-nojev windows-v0.1.0](https://github.com/chy4pro/chat-nojev/releases/tag/windows-v0.1.0)**
 
-1. 在 Releases 页下载 `jev-chat-windows-vX.Y.Z.zip`（约 146 MB）
+1. 在 Release 页下载 `jev-chat-windows-v0.1.0.zip`（165.5 MB）
 2. 解压到一个固定目录（整个文件夹一起，exe 要用旁边那堆文件）
 3. 双击 `jev-chat-windows.exe`
 
@@ -29,7 +29,11 @@
 全程只有 `LLM_API_KEY` 这一个，不落任何文件；其余设置写在 exe 旁边的
 `config.json`，整个文件夹拷走设置也跟着走。
 
-> exe 没签名，SmartScreen 会拦一下：「更多信息」→「仍要运行」。介意就往下看「自己打包」，自己打的更踏实。
+这是 PyInstaller 的 onedir 打包，体积大是因为整个文件夹里带着离线 OCR 模型和 Qt。
+exe 没签名，SmartScreen 会拦一下：「更多信息」→「仍要运行」。介意就往下看「自己打包」，自己打的更踏实。
+
+> **这个包在本项目里没有被装到真机上跑过。** CI 在 `windows-latest` 上把它编译打包成功，证明的是「打得出来」，
+> 不是「装了能用」——没人在真实的 Windows + 微信环境里验证过。装的人是第一个试的人。
 
 ## 使用说明
 
@@ -62,7 +66,7 @@ DeepSeek 官方 API（`api.deepseek.com`）国内直连，基本就是一次 HTT
 **花多少钱**
 
 只有对方来新消息才调**一次**模型（DeepSeek Flash，判断和候选一起回来），十分钟没人说话就是十分钟零调用。
-比上游少一次调用，但这一次的输出更长（判断字段带概率表），`max_tokens` 相应从 400 提到 1600。
+比原版少一次调用，但这一次的输出更长（判断字段带概率表），`max_tokens` 相应从 400 提到 1600。
 思考模式默认关，别开——写三句话用不上，慢好几倍还贵。
 
 ## 截图
@@ -117,7 +121,7 @@ DeepSeek 官方 API（`api.deepseek.com`）国内直连，基本就是一次 HTT
 - **API key 只进环境变量，而且全程只有一个。** `LLM_API_KEY`，不管来源选哪家都是这一个槽。
   写进注册表 `HKCU\Environment`（跟 `setx` 同一个地方），任何文件里都不出现 key，也绝不进日志
   （报错文本一律脱敏）。老版本的 `DEEPSEEK_API_KEY` 仍然能读到，保存一次就迁到新名字上。
-  上游那把判断模型的 `JEV_API_KEY` 这一版用不上了，设置页也不再问它。
+  原版那把判断模型的 `JEV_API_KEY` 这一版用不上了，设置页也不再问它。
 - **启动时查一次版本号（可关）。** 只向 GitHub Releases API 发一个 GET，带的只有 UA 和当前版本号，
   不夹带任何聊天内容；设置里「启动时检查更新」关掉就完全不发这个请求，源码直接跑（没有版本号）也
   不会发。
@@ -174,7 +178,7 @@ WGC 截微信窗口（GPU 合成窗口也能截，被遮挡也能截）
 **那一次调用要回什么**：一个 JSON 对象——`replies`（恰好 3 条）、`best_reply`（点名 `reply_a/b/c`
 其中一个）、`reply_scores`（每条一个 0~1 的分）、`judgment`（7 道判断题）。题目原文（选项集合、
 0–9 的紧张度判据、排序那道题的说法）由 `core/questions.py` 的 `render_judgment_spec()` 原样铺进
-提示词，那里是这些文字唯一的家。其中 3 道 choice 题的**答案**跟上游不一样：上游是判断模型从固定
+提示词，那里是这些文字唯一的家。其中 3 道 choice 题的**答案**跟原版不一样：它是判断模型从固定
 英文标签里挑一个、界面再按一张对照表翻成中文；这一版让模型直接用**对话那门语言**写一句短语
 （选项和判据还是那些英文 key 和说明，只是不再照抄 key），界面原样显示，见下面那段和
 `docs/EQUIVALENCE.md`。OpenAI / Gemini 两种协议会顺带打开各自的 JSON 模式
@@ -183,16 +187,16 @@ Anthropic 没有等价开关，只能靠提示词。
 
 解析（把 JSON 从回答里抠出来）该兜的都兜：围栏、前后废话、截断的半个对象、整段不是 JSON 的逐行兜底。
 **适配这一层只搬键，不校验**：标签、分数、每条的分一律按模型给的原样递给 `core/engine.py` 和悬浮窗。
-它们本来就得防着上游那个判断模型吐垃圾——`best_reply.choice` 认不出就退第一条、分取不出数记 0、
+它们本来就得防着原版那个判断模型吐垃圾——`best_reply.choice` 认不出就退第一条、分取不出数记 0、
 紧张度不是 0–9 的有限数字就显示「紧张度待判断」、choice 不是字符串就显示「暂未判断」。
-在适配层再夹一次只会让同一份坏值的表现跟上游不一样（上游给 11 分显示「待判断」，夹成 9 就成了
+在适配层再夹一次只会让同一份坏值的表现跟它不一样（它给 11 分显示「待判断」，夹成 9 就成了
 「紧张度 9/9」）。模型整条没给的字段就不出现，但绝不替它编一个值。排序整块没读出来就退回第一条、
-分记 0；点名和最高分打架时**以点名为准**（上游也是这样：界面把点名那条强制排第一，分只用来给其余的
+分记 0；点名和最高分打架时**以点名为准**（原版也是这样：界面把点名那条强制排第一，分只用来给其余的
 排序）。`tools/offline_check.py` 把这些坏形状都喂一遍，不联网，并且把同一份值喂给 `app/overlay.py`
-里真正那几行渲染代码，看它显示成什么。为什么是这个标准、跟上游逐键比对的结果，见
+里真正那几行渲染代码，看它显示成什么。为什么是这个标准、跟原版逐键比对的结果，见
 `docs/EQUIVALENCE.md`。
 
-温度 1.2，`max_tokens` 1600（上游 400 是只写三句话的量，判断跟着回来就不够了）；思考模式默认关，
+温度 1.2，`max_tokens` 1600（原版 400 是只写三句话的量，判断跟着回来就不够了）；思考模式默认关，
 开了会带上各家自己的思考开关、`max_tokens` 提到 5200（思考过程也算进去）。思考开关只有
 DeepSeek / OpenRouter / Anthropic / Gemini 认。模型只给出 1~2 条候选时，会带着它的回答追问一次，
 只要补齐的候选和分（判断不再问一遍）；追问也失败就按手里的实际条数走。
@@ -256,8 +260,8 @@ pyinstaller --noconfirm --clean jev.spec
 ```
 
 出来的是 `dist\jev-chat-windows\`，整个文件夹就是成品（onedir：onefile 有 150MB 要每次启动解压）。
-推一个 `windows-v*` tag，仓库根目录的 `.github/workflows/release-windows.yml` 会在 `windows-latest` 上打好、压成 zip 挂到 Release 上；
-手动触发（workflow_dispatch）只出 artifact，方便试打包。
+推一个 `windows-v*` tag，仓库根目录的 `.github/workflows/release-windows.yml` 会在 `windows-latest` 上打好、压成 zip 挂到 Release 上——
+上面「下载即用」里的 `windows-v0.1.0` 就是这样出来的；手动触发（workflow_dispatch）只出 artifact，方便试打包。
 
 ## 设置说明
 
@@ -316,7 +320,7 @@ core/                   判断 + 起草内核，平台无关；题目口径跟�
   engine.py             唯一入口 analyze(messages, relationship) → 候选 + 排序 + 判断
   providers.py          来源表：协议、地址、默认模型；纯数据，不认 key
   llm.py                三种协议的薄适配层，一律走官方 SDK：openai / anthropic / google-genai
-  errors.py             JevError、脱敏、读 key——core/ 共用的那点管道（上游在 jev_client.py 里）
+  errors.py             JevError、脱敏、读 key——core/ 共用的那点管道（原版在 jev_client.py 里）
   questions.py          7 道判断题（唯一的家）+ build_state() + render_judgment_spec()
   draft.py              那一次调用：拼提示词、解析对象、过滤候选、映射排序、不足时追问补齐
 tools/
@@ -375,25 +379,25 @@ config.json             你自己的设置，不进仓库（在 .gitignore 里�
   东西全部照旧，只是产出方从 TypeSafe Jev 换成了同一个语言模型
 - `confidence` / `probabilities` 现在是模型自评，不是校准过的概率，代码里就地注明了
 - 适配层不再校验模型给的值（原先会查标签表、夹分数范围、把每条的分归一化）：只搬键，值原样递下去。
-  判断合不合法由 `core/engine.py` 和悬浮窗决定——它们本来就防着上游那个判断模型。逐键比对见
+  判断合不合法由 `core/engine.py` 和悬浮窗决定——它们本来就防着原版那个判断模型。逐键比对见
   `docs/EQUIVALENCE.md`（15 个场景全部一致）
 - 3 道 choice 题改成让模型用**对话那门语言**写一句短语（题目里的英文 key 和判据没动，只是不再照抄
   key 作答），`app/overlay.py` 里那张英文标签→中文的 `_CHOICES` 对照表随之删掉，`_choice` 原样显示
-  模型写的那句话；缺值才「暂未判断」。代价是普通情况下的用词不再跟上游逐字相同，
+  模型写的那句话；缺值才「暂未判断」。代价是普通情况下的用词不再跟原版逐字相同，
   好处是面板跟着对话的语言走
 - 配置去掉判断那一路：删掉 `core/jev_client.py`、`JEV_PROVIDERS`、`JEV_API_KEY`，设置页只剩一节模型
 - `core/llm.py` 加 JSON 模式（OpenAI `response_format` / Gemini `response_mime_type`），
   地址不认就脱掉重发一次
 - 新增 `tools/offline_check.py`：不联网，把坏形状的模型输出喂一遍，验解析器和 `analyze()` 的结果
 
-**未发版（上游）**
+**未发版（原版）**
 - 设置页「模型」卡片：判断 · Jev（OpenRouter / TypeSafe 直连）+ 起草 · 语言模型（11 家预设 + 自定义
   Base URL），三种协议一律走官方 SDK（`openai` / `anthropic` / `google-genai`），可点「获取模型」拉
   接口的真实列表；**key 收敛成两把** `JEV_API_KEY` / `LLM_API_KEY`，换来源复用同一个槽，老的
   `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` 仍能读到，保存一次自动迁移
 - 修：`settings.save` 部分保存（某项传 None）会把 `config.json` 里那几项清空——写文件前没先把要保留
   的值读出来
-- 合规：补 `NOTICE`、`LICENSE` 加上游版权行，README 加「版权与许可」「免责声明」和封号问答，重写
+- 合规：补 `NOTICE`、`LICENSE` 加原版版权行，README 加「版权与许可」「免责声明」和封号问答，重写
   「什么会出网」；发布 zip 带上 LICENSE/NOTICE
 - probe：Laya 本地决策模型能不能替 Jev 的探针（中英文题、把对话译成英文再试）——结论都不够稳，暂不替换
 
@@ -461,7 +465,7 @@ config.json             你自己的设置，不进仓库（在 .gitignore 里�
 Copyright © 2026 rezoch340 与 jev-chat 贡献者。代码以 [MIT](LICENSE) 协议开源，另见 [NOTICE](NOTICE)。
 
 - 本项目是 [Jev 聊天助手](https://github.com/jev-chat/jev-chat-jarvis)（安卓原版）的 Windows
-  姊妹项目，Jev 判断内核与题目口径来自上游，版权归 Finderchangchang 与 jev-chat 贡献者所有。
+  姊妹项目，Jev 判断内核与题目口径来自它，版权归 Finderchangchang 与 jev-chat 贡献者所有。
 - **分发或商用时须保留 LICENSE 与 NOTICE**，并在产品「关于」页、说明文档或发布页写明来源。推荐写法：
   `基于 jev-chat-windows（https://github.com/jev-chat/jev-chat-windows）二次开发`。
 - 不要用「jev-chat-windows」「Jev 聊天助手」「jev-chat」名称或 chatjevs.com 域名暗示由原作者出品或背书。

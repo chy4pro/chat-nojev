@@ -11,10 +11,12 @@ logits 出两个分布）和云端 TypeSafe Jev（`judge_jev.JevJudge`，POST /v
                   src/judge_jev.py（TypeSafe Jev 客户端）
                   src/judge_zh_test.py（decider-2b 的 22 条中文回归，测的是已删掉的模型）
   删掉的配置      TYPESAFE_API_KEY / TYPESAFE_BASE_URL / TYPESAFE_MODEL
-  一起没了的能力  **离线判断**。上游不配任何 key 也能出意图和风险（本地模型，不联网、
-                  不花钱），现在判断跟着生成一起出网。要想要回来：把 judge.Judge 整个
-                  留着，在 hud 里加一条「本地判断」开关，判断走它、生成走 API——那就是
-                  上游的两次调用，这个项目的前提正是不要那第二次。详见 docs/EQUIVALENCE.md。
+  一起没了的能力  **判断只在本地跑，不出网**。上游那个模型不配任何 key 也能出意图和风险
+                  （本地跑、不联网、不花钱）——起草候选那次调用一直要联网，这从没让整个
+                  App 离线可用；它换来的是隐私，判断本来可以不出这台机器，现在跟生成一起
+                  出网了。要想要回来：把 judge.Judge 整个留着，在 hud 里加一条「本地判断」
+                  开关，判断走它、生成走 API——那就是上游的两次调用，这个项目的前提正是
+                  不要那第二次。详见 docs/EQUIVALENCE.md。
 
 题目文字只有这一份，别在别处重打（src/generate.py 的提示词从这里渲染）。
 """

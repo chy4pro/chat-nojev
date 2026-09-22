@@ -72,8 +72,11 @@ them the row is empty — exactly what upstream shows when its lookup misses.
 
 ## What the merge cost
 
-- **The local judge is gone.** `Mapika/decider-2b` judged offline, with no key and no
-  network. It was a second judgment model, so by this project's thesis it goes; but it was
+- **The local judge is gone.** `Mapika/decider-2b` judged with no key and no network —
+  generation always needed a remote model, so this never made the app usable offline; what
+  it bought was privacy, since only the drafting call left the machine and the judgment
+  stayed local. Now the two are one call, so the judgment's content leaves with the draft
+  too. It was a second judgment model, so by this project's thesis it goes; but it was
   also a real feature, and removing it is a product loss. `src/questions.py` carries the
   full account at the top of the file, including what it would take to bring it back.
 - **Judgment no longer beats the candidates to the screen.** Upstream ran the judge and the

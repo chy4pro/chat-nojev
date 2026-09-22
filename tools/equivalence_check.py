@@ -138,7 +138,7 @@ SCENARIOS = [
                  danger_level={"score": 9, "confidence": 1.0,
                                "probabilities": {"8": 0.0, "9": 1.0}})),
     scenario("ranking_block_missing", C3, None, None,
-             "上游 Jev 回答整块没有 best_reply；我们这边整块没有排序（best_reply + reply_scores 都缺）"),
+             "jev-chat-windows Jev 回答整块没有 best_reply；我们这边整块没有排序（best_reply + reply_scores 都缺）"),
     scenario("choice_names_missing_candidate", C2, "reply_c",
              {"reply_a": 0.40, "reply_b": 0.60},
              "点名的候选下标不存在（只有两条却点 reply_c）：两边都把标签原样递给 engine 去夹"),
@@ -250,7 +250,7 @@ def run_upstream(tree: str) -> dict:
     import core.questions as questions
 
     assert {n: q["type"] for n, q in questions.JUDGE_QUESTIONS.items()} == FIELD_KIND, \
-        "上游的 JUDGE_QUESTIONS 跟测试里的题型表对不上"
+        "jev-chat-windows 的 JUDGE_QUESTIONS 跟测试里的题型表对不上"
 
     out = {}
     for scn in SCENARIOS:
@@ -399,11 +399,11 @@ def drive(python: str, upstream_tree: str, ours_tree: str) -> int:
           f"{expected} 有已知分歧，{failures} 失败")
 
     if details:
-        print("\n差异明细（键 / 上游 / 我们）:")
+        print("\n差异明细（键 / jev-chat-windows / 我们）:")
         for name, verdict, diffs in details:
             print(f"\n  [{verdict}] {name}")
             for d in diffs:
-                print(f"    {d['key']}\n      上游: {d['upstream']!r}\n      我们: {d['ours']!r}")
+                print(f"    {d['key']}\n      jev-chat-windows: {d['upstream']!r}\n      我们: {d['ours']!r}")
 
     repr_keys = {}
     for scn in SCENARIOS:
@@ -413,20 +413,20 @@ def drive(python: str, upstream_tree: str, ours_tree: str) -> int:
         print("\n数值相等但 int/float 表示不同（不算分歧，见 REPORT）:")
         for key, pairs in sorted(repr_keys.items()):
             for a, b in sorted(pairs):
-                print(f"    {key}: 上游 {a} / 我们 {b}")
+                print(f"    {key}: jev-chat-windows {a} / 我们 {b}")
 
     print("\nusage（按要求不参与比对，两边分别是）:")
-    print(f"    上游: {json.dumps(up[SCENARIOS[0]['name']]['result']['usage'], ensure_ascii=False)}"
+    print(f"    jev-chat-windows: {json.dumps(up[SCENARIOS[0]['name']]['result']['usage'], ensure_ascii=False)}"
           "   ← 来自 Jev 判断接口的 token 计数")
     print(f"    我们: {json.dumps(ours[SCENARIOS[0]['name']]['result']['usage'], ensure_ascii=False)}"
           "   ← core/llm.chat() 只回文本，这一版没有 token 计数")
 
     print("\n每个场景的 API 调用次数（证明没打网络、也没多打）:")
     for scn in SCENARIOS[:3]:
-        print(f"    {scn['name']}: 上游 draft={up[scn['name']]['calls']['draft']} "
+        print(f"    {scn['name']}: jev-chat-windows draft={up[scn['name']]['calls']['draft']} "
               f"ask={up[scn['name']]['calls']['ask']} / 我们 chat={ours[scn['name']]['calls']['chat']}")
     two = "two_candidates_only"
-    print(f"    {two}: 上游 draft={up[two]['calls']['draft']} ask={up[two]['calls']['ask']} "
+    print(f"    {two}: jev-chat-windows draft={up[two]['calls']['draft']} ask={up[two]['calls']['ask']} "
           f"/ 我们 chat={ours[two]['calls']['chat']}（不足 3 条会追问一次，桩让它失败）")
 
     return 1 if failures else 0
@@ -449,7 +449,7 @@ def main() -> int:
         json.dump(run_ours(args.tree), sys.stdout, ensure_ascii=False)
         return 0
     if not args.upstream:
-        ap.error("要给 --upstream <上游那棵树> 或设 UPSTREAM_TREE")
+        ap.error("要给 --upstream <jev-chat-windows 那棵树> 或设 UPSTREAM_TREE")
     return drive(args.python, args.upstream, args.ours)
 
 

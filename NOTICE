@@ -38,9 +38,12 @@ judgment models — a local decoder (`Mapika/decider-2b`) and the cloud TypeSafe
 Jev — and a third call that ranked the candidates; all three are now the same
 call that writes the replies, one per tone, run concurrently as upstream runs
 them. The verdict the panel reads keeps its keys and its values. **The local
-judge is deleted**, and with it the ability to judge offline with no key: that
-is a loss of function, not only of a model, and it is recorded at the top of
-`macos/src/questions.py` along with what it would take to restore. The intent
+judge is deleted**, and with it the ability to keep that judgment entirely on
+the machine, with no key and no network call leaving it — generation always
+needed a remote model, so this never made the app work offline, but it did
+keep the judgment private. That is a loss of function, not only of a model,
+and it is recorded at the top of `macos/src/questions.py` along with what it
+would take to restore. The intent
 is answered as a short phrase in the language of the conversation instead of
 one of the eight fixed labels, so the panel shows the model's own wording; the
 labels and their descriptions still frame the question. The `actions` row, a

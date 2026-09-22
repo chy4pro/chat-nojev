@@ -171,7 +171,7 @@ val SCENARIOS = listOf(
             "should_reply_now" to mapOf("noul" to 0.0),
             "tension_resolved" to mapOf("noul" to 0.3)),
         nounBare = true),
-    Scn("score_legend_from_api", "上游那边带 legend（接口就是这么回的），我们没有：档数必须一样", C3, "reply_b",
+    Scn("score_legend_from_api", "jev-chat-jarvis 那边带 legend（接口就是这么回的），我们没有：档数必须一样", C3, "reply_b",
         mapOf("reply_a" to 0.25, "reply_b" to 0.55, "reply_c" to 0.20),
         legend = true)
 )
@@ -357,7 +357,7 @@ fun compare(upFile: String, oursFile: String): Int {
         val diffs = (a.keys + b.keys).sorted().mapNotNull { key ->
             val va = a[key] ?: "<absent>"
             val vb = b[key] ?: "<absent>"
-            if (va == vb) null else "$key\n      上游: $va\n      我们: $vb"
+            if (va == vb) null else "$key\n      jev-chat-jarvis: $va\n      我们: $vb"
         }
         val keys = diffs.map { it.substringBefore("\n") }
         val verdict = when {
@@ -376,7 +376,7 @@ fun compare(upFile: String, oursFile: String): Int {
     println("共 ${SCENARIOS.size} 个场景：${SCENARIOS.size - failures - expected} 完全一致，" +
         "$expected 有已知分歧，$failures 失败")
     if (details.isNotEmpty()) {
-        println("\n差异明细（键 / 上游 / 我们）:")
+        println("\n差异明细（键 / jev-chat-jarvis / 我们）:")
         for ((name, verdict, diffs) in details) {
             println("\n  [$verdict] $name")
             diffs.forEach { println("    $it") }
@@ -384,7 +384,7 @@ fun compare(upFile: String, oursFile: String): Int {
     }
     println("\n每个场景的接口调用（证明没打网络，也证明调用次数变了）:")
     for (scn in SCENARIOS.take(3)) {
-        println("    ${scn.name}: 上游 ${up.getJSONObject(scn.name).getJSONArray("calls")}" +
+        println("    ${scn.name}: jev-chat-jarvis ${up.getJSONObject(scn.name).getJSONArray("calls")}" +
             " / 我们 ${ours.getJSONObject(scn.name).getJSONArray("calls")}")
     }
     println("\nlatencyMs 不参与比对（墙上时间，不是任何一边算出来的值）。")

@@ -114,7 +114,7 @@ def scenario(name, note, *, tones=(SLOT_A, SLOT_B), replies=None, scores=None,
 
 SCENARIOS = [
     scenario("ordinary_two_tones", "普通情况：两个话术各两条候选"),
-    scenario("three_tones", "三个话术：上游三次生成 + 一次判断 + 一次排序；我们三次调用",
+    scenario("three_tones", "三个话术：jev-chat-jarvis-mac 三次生成 + 一次判断 + 一次排序；我们三次调用",
              tones=(SLOT_A, SLOT_B, SLOT_C),
              replies={SLOT_A: TONE_A_REPLIES, SLOT_B: TONE_B_REPLIES, SLOT_C: TONE_C_REPLIES}),
     scenario("second_candidate_wins_inside_a_tone",
@@ -127,20 +127,20 @@ SCENARIOS = [
     scenario("boundary_values_high", "边界值：风险 9、把握 1",
              judgment_values=judgment(risk=9, confidence=1.0,
                                       risk_probs={"8": 0.1, "9": 0.9})),
-    scenario("risk_is_a_decimal", "风险是小数（上游本地模型给的是均值）：两边都四舍五入着显示",
+    scenario("risk_is_a_decimal", "风险是小数（jev-chat-jarvis-mac 本地模型给的是均值）：两边都四舍五入着显示",
              judgment_values=judgment(risk=4.7)),
     scenario("risk_outside_its_range",
              "风险 11（超出 0..9）：两边都原样递下去，面板显示「危险 11/9」，谁也不夹回 9",
              judgment_values=judgment(risk=11, risk_probs={"9": 1.0})),
     scenario("risk_not_a_number",
-             "风险不是数：上游判断层把它换成 0.0（面板显示「安全 0/9」），"
+             "风险不是数：jev-chat-jarvis-mac 判断层把它换成 0.0（面板显示「安全 0/9」），"
              "我们原样递下去、面板显示「风险待判断」——不替模型说「安全」",
              judgment_values=judgment(risk="很高"),
              expect_diff=("verdict.risk", "panel.risk", "panel_risk_scale", "panel_last_risk")),
     scenario("intent_inside_the_taxonomy",
-             "意图正好是题面里的标签：连 actions 都一模一样（上游查表，我们让模型照着示例写）"),
+             "意图正好是题面里的标签：连 actions 都一模一样（jev-chat-jarvis-mac 查表，我们让模型照着示例写）"),
     scenario("intent_outside_the_taxonomy",
-             "题面里没有的说法：上游退成「闲聊」并按「闲聊」查 actions，"
+             "题面里没有的说法：jev-chat-jarvis-mac 退成「闲聊」并按「闲聊」查 actions，"
              "我们原样显示模型写的那句——这一条就是这个项目的论点",
              judgment_values=judgment(intent="想确认我到底跟没跟",
                                       intent_probs={"想确认我到底跟没跟": 0.8, "派活": 0.2},
@@ -148,12 +148,12 @@ SCENARIOS = [
              expect_diff=("verdict.intent", "verdict.actions", "panel.intent",
                           "panel.actions", "panel_last_intent")),
     scenario("intent_is_an_empty_string",
-             "意图给了个空串：上游退「闲聊」，我们显示「暂未判断」",
+             "意图给了个空串：jev-chat-jarvis-mac 退「闲聊」，我们显示「暂未判断」",
              judgment_values=judgment(intent="", intent_probs={}, actions=[]),
              expect_diff=("verdict.intent", "verdict.actions", "panel.intent",
                           "panel.actions", "panel_last_intent")),
     scenario("confidence_omitted",
-             "没给把握：上游补 0.0（面板显示「意图识别率 0%」），我们不补、那一行空着",
+             "没给把握：jev-chat-jarvis-mac 补 0.0（面板显示「意图识别率 0%」），我们不补、那一行空着",
              judgment_values=judgment(confidence=None),
              expect_diff=("verdict.confidence", "panel.confidence")),
     scenario("probabilities_not_normalized",
@@ -166,12 +166,12 @@ SCENARIOS = [
              "有一条候选没给分：两边都记 0，行不丢",
              drop_scores=[TONE_B_REPLIES[1]]),
     scenario("one_tone_fails_generation",
-             "一个话术的生成调用挂了：另一个话术照常出候选，判断照常（上游是独立那次调用，"
+             "一个话术的生成调用挂了：另一个话术照常出候选，判断照常（jev-chat-jarvis-mac 是独立那次调用，"
              "我们是从活下来的那次调用里取）",
              gen_http_error=[SLOT_A]),
     scenario("judgment_fails_entirely_generation_succeeds",
              "判断整个没出来、生成成功：两边都不画判断、候选照常上屏；"
-             "但上游的排序跟着判断一起没了（同一个模型），我们的分跟候选一起回来所以还在",
+             "但 jev-chat-jarvis-mac 的排序跟着判断一起没了（同一个模型），我们的分跟候选一起回来所以还在",
              judge_http_error=500,
              expect_diff=("final_candidates",)),
 ]
@@ -541,11 +541,11 @@ def drive(python: str, upstream_tree: str, ours_tree: str) -> int:
           f"{expected} 有已知分歧，{failures} 失败")
 
     if details:
-        print("\n差异明细（键 / 上游 / 我们）:")
+        print("\n差异明细（键 / jev-chat-jarvis-mac / 我们）:")
         for name, verdict, diffs in details:
             print(f"\n  [{verdict}] {name}")
             for d in diffs:
-                print(f"    {d['key']}\n      上游: {d['upstream']!r}\n      我们: {d['ours']!r}")
+                print(f"    {d['key']}\n      jev-chat-jarvis-mac: {d['upstream']!r}\n      我们: {d['ours']!r}")
 
     repr_keys = {}
     for scn in SCENARIOS:
@@ -555,28 +555,28 @@ def drive(python: str, upstream_tree: str, ours_tree: str) -> int:
         print("\n数值相等但 int/float 表示不同（不算分歧）:")
         for key, pairs in sorted(repr_keys.items()):
             for a, b in sorted(pairs):
-                print(f"    {key}: 上游 {a} / 我们 {b}")
+                print(f"    {key}: jev-chat-jarvis-mac {a} / 我们 {b}")
 
     first = SCENARIOS[0]["name"]
     print("\n不参与比对的几样（按要求；两边分别是）:")
-    print(f"    verdict.backend: 上游 {up[first]['verdict']['backend']!r}"
+    print(f"    verdict.backend: jev-chat-jarvis-mac {up[first]['verdict']['backend']!r}"
           f" / 我们 {ours[first]['verdict']['backend']!r}   ← 产出方的名字，必然不同")
-    print(f"    面板状态行:      上游 {up[first]['panel']['status'][0]!r}"
+    print(f"    面板状态行:      jev-chat-jarvis-mac {up[first]['panel']['status'][0]!r}"
           f" / 我们 {ours[first]['panel']['status'][0]!r}   ← 它显示的就是 backend")
-    print(f"    上屏次数:        上游 {up[first]['push_selectors']}"
+    print(f"    上屏次数:        jev-chat-jarvis-mac {up[first]['push_selectors']}"
           f"\n                     我们 {ours[first]['push_selectors']}"
-          "\n                     ← 上游先推一次没排序的（显示「排序中」）、排完再推一次；"
+          "\n                     ← jev-chat-jarvis-mac 先推一次没排序的（显示「排序中」）、排完再推一次；"
           "我们的分跟候选一起回来，只推一次（少一次重绘，内容相同）")
 
     print("\n每个场景的调用次数（证明没打网络、也没多打）:")
-    print(f"    {'场景'.ljust(width - 4)}  上游(判断/排序/生成)   我们(生成)")
+    print(f"    {'场景'.ljust(width - 4)}  jev-chat-jarvis-mac (判断/排序/生成)   我们(生成)")
     for scn in SCENARIOS:
         c_up, c_ours = up[scn["name"]]["calls"], ours[scn["name"]]["calls"]
         counts = f"{c_up['judge']}/{c_up['rank']}/{c_up['gen']}"
         print(f"    {scn['name'].ljust(width)}{counts.ljust(23)}{c_ours['gen']}")
     total_up = sum(sum(up[s["name"]]["calls"].values()) for s in SCENARIOS)
     total_ours = sum(sum(ours[s["name"]]["calls"].values()) for s in SCENARIOS)
-    print(f"    合计：上游 {total_up} 次 / 我们 {total_ours} 次")
+    print(f"    合计：jev-chat-jarvis-mac {total_up} 次 / 我们 {total_ours} 次")
 
     return 1 if failures else 0
 
@@ -598,7 +598,7 @@ def main() -> int:
         json.dump(run_ours(args.tree), sys.stdout, ensure_ascii=False)
         return 0
     if not args.upstream:
-        ap.error("要给 --upstream <上游那棵树> 或设 UPSTREAM_TREE")
+        ap.error("要给 --upstream <jev-chat-jarvis-mac那棵树> 或设 UPSTREAM_TREE")
     return drive(args.python, args.upstream, args.ours)
 
 
