@@ -3,25 +3,22 @@
 微信（Windows 4.x）旁挂的回复辅助：本地 OCR 读屏上的对话 → 一次模型调用同时给出判断和 3 条候选回复 →
 一键填入微信输入框。**发送永远手动，程序不替你按发送。**
 
-> **这一份是 [jev-chat-windows](https://github.com/jev-chat/jev-chat-windows) 的派生（[chat-nojev](../README.md)），只改了一件事。**
-> 原版把判断和排序交给专门的判断模型（TypeSafe Jev），起草另算一次调用；这里把两次合成一次——
-> 同一个语言模型写候选、答那 7 道判断题、并点名哪条最好。题目原文、选项集合、0–9 的紧张度档位
-> 一个字没改（见 `core/questions.py`），界面读到的字段也一模一样，**只是产出方换了**。
-> 因此 `confidence` / `probabilities` 现在是模型的自评，不是它那种校准过的概率；
-> 配置上少了一把 key，全程只有 `LLM_API_KEY`。这道接缝有一套差分测试对着原版逐字段盯着，
-> 判据和逐场景结果见 [`docs/EQUIVALENCE.md`](docs/EQUIVALENCE.md)——**那是关于这一处的证据，不是对这个程序的质量判断**。
->
-> **其余全是原版的代码**：截屏、OCR、起草的提示词、悬浮窗、填入微信、「不替你按发送」那条边界，
-> 连同原版的 bug 和粗糙处一起留着。这一版没有审过这些代码，也没有跑过——见下面「不是原版的地方」
-> 和每个下载块里的那句话。
+> **这一份是 [jev-chat-windows](https://github.com/jev-chat/jev-chat-windows) 的派生（[chat-nojev](../README.md)）。**
+> 原版把判断和排序交给专门的判断模型（TypeSafe Jev），起草另算一次调用；这里合成一次：同一个语言模型
+> 写 3 条候选、答那 7 道判断题、并点名哪条最好。题面、选项集合、0–9 的紧张度档位一个字没改
+> （见 `core/questions.py`），界面读到的字段也一模一样，**换的只是产出方**——所以 `confidence` /
+> `probabilities` 现在是模型的自评而不是校准过的概率，配置上也只剩 `LLM_API_KEY` 一把 key。
+> 其余全是原版的代码，连同它的 bug；这一版既没有审过它，也没有在真机上跑过。
+> 差分测试的判据和逐场景结果见 [`docs/EQUIVALENCE.md`](docs/EQUIVALENCE.md)，合并的理由和代价见
+> [`../docs/MERGE.md`](../docs/MERGE.md)。
 
 采集这一侧来自安卓版 [Finderchangchang/jev-chat-JARVIS](https://github.com/Finderchangchang/jev-chat-JARVIS)
 的 Windows 改写：窗口截图 + 离线 OCR。
 
 ## 不是原版的地方
 
-「只改了一件事」不完全是真的。合并本身带来的改动（删掉判断那一路的客户端、配置和设置页那一节）不算，
-剩下的全在这里；仓库根的 [README](../README.md#只改一件事不成立的地方) 里三个变体一起列。
+合并本身带来的改动（删掉判断那一路的客户端、配置和设置页那一节）不算，剩下跟上游的出入全在这里；
+根 [README](../README.md#和原版不一样的地方) 里三个变体一起列，长版在 [`../docs/MERGE.md`](../docs/MERGE.md#windows)。
 
 - **选择题的答案不再是固定的英文标签。** 原版由分类器作答，只能从封闭的 key 集合里挑，`app/overlay.py`
   拿 `_CHOICES` 翻成固定的中文；这一版让模型用**对话那门语言**写一句短语，那张表删了，面板显示模型
