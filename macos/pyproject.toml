@@ -1,0 +1,16 @@
+[project]
+name = "jev-jarvis"
+version = "0.4.0"
+description = "微信消息意图识别悬浮窗：一次调用给出意图、风险和回复候选（macOS）"
+readme = "README.md"
+requires-python = ">=3.12"
+# 上游还依赖 torch / transformers / huggingface-hub / laya：判断层那个本地模型
+# （Mapika/decider-2b，权重约 7GB）要它们。判断合进了生成那一次网络调用，本地不再
+# 加载任何模型，这四个依赖一起去掉——装包从几个 GB 降到几十 MB，也不再有首次下载。
+# 注意：uv.lock 是上游那份，删了依赖之后要在 macOS 上重跑一次 `uv lock`（这个容器里没有 uv）。
+dependencies = [
+    "pyobjc-framework-applicationservices>=12.2.2",
+    "pyobjc-framework-cocoa>=12.2.2",
+    "pyobjc-framework-quartz>=12.2.2",
+    "pyobjc-framework-vision>=12.2.2",
+]

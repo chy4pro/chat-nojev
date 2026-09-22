@@ -1,0 +1,1985 @@
+"""Floating HUD: a non-activating panel beside WeChat showing intent, risk and ranked replies.
+
+Design notes
+  * NSWindowStyleMaskNonactivatingPanel + floating level: the panel never steals focus
+    from WeChat, and window-ID capture means it never appears in our own screenshots.
+  * Poll loop: read the chat, hash the newest message, analyse only when it changes.
+  * 判断和候选是同一次调用的产物（src/generate.py）：上游的判断层（本地 decider-2b /
+    云端 TypeSafe Jev）和那次单独的排序调用都没了，意图、风险、具体行动和每条候选的分
+    都跟着候选一起回来。所以这里也没有「预判」那条线了——消息一被看见就开跑的只剩
+    generation 一条（latest-wins），停稳后直接把判断和候选一起上屏。流式那一路候选仍然
+    边写边上屏（"排序中"），整条回完再带着分重画一次。
+  * The panel positions itself against WeChat's window each tick, so it follows moves,
+    resizes and monitor changes without any window-server hooks.
+  * The HUD uses native macOS vibrancy with semantic WeChat green/amber/red accents. The
+    Appearance stays pinned to Aqua so labels and controls keep the same tested contrast.
+  * 「填入」 writes through the Accessibility API into WeChat's input box (src/fill.py): no
+    synthetic keystrokes, no clipboard, and nothing needs to be frontmost. It needs the
+    Accessibility permission; when that is missing the HUD asks for it and reports the
+    failure.
+"""
+
+from __future__ import annotations
+
+import objc
+import os
+import subprocess
+import threading
+import time
+from math import isfinite
+from pathlib import Path
+
+import AppKit
+import Quartz
+import sys
+
+from AppKit import (
+    NSAppearance,
+    NSAttributedString,
+    NSBackingStoreBuffered,
+    NSBackgroundColorAttributeName,
+    NSBezierPath,
+    NSButton,
+    NSColor,
+    NSFont,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
+    NSPanel,
+    NSPasteboard,
+    NSPasteboardTypeString,
+    NSPopUpButton,
+    NSScreen,
+    NSTextField,
+    NSView,
+    NSWindowMiniaturizeButton,
+    NSWindowStyleMaskBorderless,
+    NSWindowStyleMaskClosable,
+    NSWindowStyleMaskMiniaturizable,
+    NSWindowStyleMaskNonactivatingPanel,
+    NSWindowStyleMaskTitled,
+    NSWindowZoomButton,
+    NSWindowCloseButton,
+)
+from Foundation import (NSMutableAttributedString, NSMakeRange, NSMakeRect,
+                        NSMakeSize, NSObject, NSTimer)
+
+sys.path.insert(0, str(Path(__file__).parent))
+import userconfig  # noqa: E402
+
+userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inherit none)
+
+from perception import (  # noqa: E402
+    frontmost_app_is_wechat, read_conversation, screen_capture_ok,
+    request_screen_capture, warm_ocr)
+from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
+import styles  # noqa: E402
+import fill  # noqa: E402
+import ui_style  # noqa: E402
+
+PANEL_W, PANEL_H = 360, 614   # tall enough for 3-line candidates + the chat name row
+COLLAPSED_H = 96              # height when the panel is rolled up
+# The tick timer fires at FAST_TICK; a read only runs when due. A quiet screen (fingerprint
+# match ⇒ no OCR) re-checks every FAST_TICK — a new message surfaces within 0.25 s instead
+# of within 1 s. A read that found a change (full capture+OCR paid) first keeps a SHORT
+# cadence for a few reads (a burst's next message is noticed in ~0.45 s, not after a full
+# SLOW_TICK) and only settles back to SLOW_TICK if the pane keeps moving — that is the
+# cadence the old fixed poll had, kept as the CPU guard for a continuously moving screen.
+FAST_TICK = 0.25         # re-check cadence while the chat pane is quiet
+BURST_TICK = 0.45        # short cadence right after a change: catch the burst's next message
+BURST_READS = 3          # how many reads stay on BURST_TICK before falling back to SLOW_TICK
+SLOW_TICK = 1.0          # re-check cadence while the chat pane keeps moving
+READ_FAILURE_HIDE_S = 2.0  # do not flicker on a transient capture/window miss
+SETTLE_S = 1.2           # upper bound on the settle wait (anti-flood; unchanged by design)
+EARLY_SETTLE_S = 0.70    # the gate may open this early …
+STABLE_READS = 3         # … but only after this many consecutive unchanged reads
+MIN_GAP_S = 2.0          # never restart analysis faster than this
+CONTEXT_TURNS = 4        # recent turns the call sees (judgment + generation share it now)
+# 上游还有 JUDGE_TURNS=2：判断是单独一次前向，prompt 每次都要重付，所以只给两轮。
+# 现在判断和候选共用同一个 prompt，没有第二份上下文可省了——判断看到的是 CONTEXT_TURNS
+# 那 4 轮，比上游多两轮（对判断只会更好，代价是 0）。
+IDLE_STATUS = "等待微信消息…"       # the resting status line (also set at build time)
+
+
+# Shared with the settings window so both surfaces keep one visual vocabulary.
+PALETTE = ui_style.PALETTE
+_rgb = ui_style.rgb
+
+# Compact reply rows: probability rail, fully wrapped reply, then the two existing actions.
+# Only the minimum is fixed. _relayout() measures each candidate and grows the row as needed.
+CAND_ROW_X, CAND_ROW_W, CAND_ROW_MIN_H = 20, PANEL_W - 40, 50
+CAND_PROB_X, CAND_PROB_W = 30, 44
+CAND_TEXT_X, CAND_TEXT_W = 82, 144
+CAND_BTN_W, CAND_BTN_H, CAND_BTN_GAP = 48, 22, 4
+CAND_BTN_X = PANEL_W - 26 - (2 * CAND_BTN_W + CAND_BTN_GAP)
+CAND_ROW_GAP = 4
+
+# 话术 groups. Each group is headed by its dropdown; its candidates sit under it. The panel
+# is only as tall as the groups in use, so nothing is reserved for a tone that is switched
+# off (that reservation is what used to leave a dead gap in the middle).
+TONE_DD_X, TONE_DD_W, TONE_DD_H, TONE_DD_GAP = 20, PANEL_W - 40, 24, 5
+TONE_DD_INSET = 8         # the popup sits this far inside its field, like text in an input box
+TONE_DD_FONT = 12         # compact but still the clearest interactive label in each group
+                          # thing on the panel the user is meant to click
+GROUP_PAD_Y = 5           # breathing room above the selector and below the final reply
+GROUP_GAP = 10            # between one group's rows and the next group's dropdown
+BOTTOM_PAD = 14           # below the last group
+
+
+LOG_PATH = Path.home() / "Library" / "Logs" / "jev-jarvis.log"
+
+
+# ---------------------------------------------------------------------------
+# 判断结果 → 面板上那几行文字。**校验只在这里做。**
+#
+# 上游的判断层自己会兜一道：judge_jev.JevJudge.judge() 查意图表（不在 8 个标签里就退
+# 「闲聊」）、把 confidence 和 risk 强转成 float（转不了就 0.0），所以面板可以直接
+# v["intent"]、v["confidence"]:.0% 地用。这一版的适配层只翻译不校验（见 src/generate.py
+# 的说明），坏值是原样递到这儿的——所以那道兜底搬到了用的地方，也就是下面这三个函数。
+# 结果是一样的：同一份坏值，面板不炸；区别只在坏值现在显示成「暂未判断」，而不是被判断层
+# 悄悄改成「闲聊」或者 0。
+#
+# 范围一概不查：上游给 11 分就显示「危险 11/9」，这里照旧。夹回 9 会让同一份坏值显示成
+# 「9/9」——那是改行为，不是兜底。
+def _judgment_text(value) -> str:
+    """意图那行：模型写的那句话原样显示；没给 / 空的 / 不是字符串才「暂未判断」。
+
+    上游这里是判断模型从 8 个固定标签里挑一个，面板显示那个标签。通用模型能直接写出
+    要显示的那句话（用对话那门语言），所以面板显示的就是它写的，不再有对照表。
+    """
+    return value.strip() if isinstance(value, str) and value.strip() else "暂未判断"
+
+
+def _risk_level(value) -> int | None:
+    """风险那行的档位：能当数用就四舍五入成整档，不能就 None（面板显示「风险待判断」）。
+
+    上游显示的是均值四舍五入后的整数（「4.7/9」读起来像测量值，「5/9」才是估计值）,
+    这里一个字没改。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(round(value)) if isfinite(value) else None
+
+
+def _confidence_text(verdict: dict) -> str:
+    """把握那行：模型给了数才显示百分比，没给或者不是数就整行空着（不编一个 0%）。"""
+    value = verdict.get("confidence")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
+        return ""
+    return f"{value:.0%}"
+
+
+def _prob_text(value) -> str:
+    """候选那一行左边那个百分比。
+
+    None = 这一条还没拿到分（流式刚上屏的那一瞬间，上游也是这个状态）。
+    分是模型自己报的，可能不是数——那就显示「待定」，不按 0 处理（0% 是一句它没说过的话）。
+    """
+    if value is None:
+        return "排序中"
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
+        return "待定"
+    return f"{value * 100:.0f}%"
+
+
+def _actions_text(verdict: dict) -> str:
+    """具体行动那行：模型写的几条原样显示，拿 · 串起来。
+
+    上游这一行是按意图查一张静态表（judge.ACTION_MAP，V0 的注释写着「no generation
+    involved」——判断模型不写字，只能查表）。意图现在是模型自己写的一句短语，查表必然
+    查不到，所以这几条改由同一次调用一起写（题面见 src/questions.py，ACTION_MAP 原样
+    留在那里当示例）。模型没写就是空行——跟上游查不到意图时显示的完全一样。
+    """
+    actions = verdict.get("actions")
+    if isinstance(actions, str):            # 有的模型直接给一句话
+        actions = [actions]
+    if not isinstance(actions, (list, tuple)):
+        return ""
+    return " · ".join(a.strip() for a in actions if isinstance(a, str) and a.strip())
+
+
+def _log(msg: str) -> None:
+    """One line per stage: to stdout, and into ~/Library/Logs/jev-jarvis.log.
+
+    "It feels slow" is not actionable on its own, so every analysis prints what each stage
+    cost; that is the whole point of this function. Deliberately **no message text and no
+    candidate text**: this file is meant to be pasted into an issue, and the app's premise
+    is that chat content stays on the machine.
+
+    Both destinations on purpose: the .app launcher already redirects stdout into this same
+    file, while `./start.command` only shows a terminal — so which place held the evidence
+    depended on how the user happened to launch it. The inode check stops the .app case
+    from writing every line twice.
+    """
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    try:
+        if os.fstat(sys.stdout.fileno()).st_ino == LOG_PATH.stat().st_ino:
+            return                       # stdout already IS that file (the .app case)
+    except Exception:
+        pass
+    try:
+        with open(LOG_PATH, "a") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass                             # a log we cannot write is not worth breaking over
+
+
+class _BoxesView(NSView):
+    """The YOLO overlay's canvas: paints whatever `boxes` last held.
+
+    boxes: [(NSRect, NSColor, line_width, NSAttributedString chip), ...] in view
+    coordinates, set from the main thread and followed by setNeedsDisplay_. The view
+    owns no data — it only renders the controller's most recent read, which is what
+    keeps the overlay honest: what you see boxed is exactly what the pipeline read.
+    """
+
+    def drawRect_(self, rect):
+        for box in getattr(self, "boxes", None) or []:
+            r, color, lw, chip = box[:4]
+            color.set()
+            NSBezierPath.setDefaultLineWidth_(lw)
+            if len(box) > 4 and box[4]:
+                path = NSBezierPath.bezierPathWithRect_(r)
+                path.setLineWidth_(lw)
+                path.setLineDash_count_phase_([6.0, 4.0], 2, 0)
+                path.stroke()
+            else:
+                NSBezierPath.strokeRect_(r)
+            chip.drawAtPoint_((r.origin.x, r.origin.y + r.size.height + 2))
+
+
+class HudController(NSObject):
+    def init(self):
+        self = objc.super(HudController, self).init()
+        if self is None:
+            return None
+        self.last_seen = None          # newest message text observed
+        self._reply_key = None         # (conversation, incoming text), never an outgoing message
+        self._reply_epoch = 0          # invalidate even if the same text reappears later
+        self._reply_worker = threading.local()
+        self.last_change_ts = 0.0      # when it last changed (burst detection)
+        self.last_analyze_ts = 0.0     # rate limit for analysis starts
+        self.analyzed_text = None      # what the panel currently shows
+        self._read_once = False        # first OCR call includes Vision's own load
+        self._last_skip_reason = None
+        self.generator = Generator()
+        # 话术: per-slot tone selection. A slot on 不用 contributes no request and no rows,
+        # so the panel is exactly as tall as the groups actually in use.
+        self.slot_tones = list(styles.DEFAULT_SLOTS) + [styles.NONE_LABEL]
+        self.slot_tones = self.slot_tones[:styles.MAX_SLOTS]
+        while len(self.slot_tones) < styles.MAX_SLOTS:
+            self.slot_tones.append(styles.NONE_LABEL)
+        self._dds: list = []
+        self._dd_boxes: list = []       # the flat fields the dropdowns are drawn into
+        self._group_boxes: list = []    # translucent surfaces behind active tone groups
+        self._rows: list = []
+        self._fixed: list = []          # (control, x, dy_from_top, w, h) — the rows above
+        self._detail_views: list = []   # non-data chrome hidden with the expanded details
+        self._risk_dots: list = []      # low / medium / high indicators, presentation only
+        self._group_top = 0             # where the first group starts, from the top
+        self._title_h = 28              # measured right after the panel is built
+        self.cand_texts: list[str | None] = [None] * (styles.MAX_SLOTS * styles.PER_TONE)
+        self._last_intent = ""          # kept so a tone change can re-rank without re-judging
+        # streaming candidates: each generation run bumps this epoch at its start and its
+        # streamed lines carry the value, so a late line from a run a tone change or a new
+        # message superseded is dropped instead of written into the new run's rows
+        self._gen_epoch = 0
+        self._stream_rows: dict[int, int] = {}   # slot -> lines already shown, per run
+
+        self._busy = False
+        self._next_read_ts = 0.0    # reads before this timestamp are skipped (quiet screen)
+        self._fingerprint = None    # last chat-pane fingerprint; equal ⇒ skip OCR entirely
+        self._last_full = None      # last OCR'd result, reused while the pane is unchanged
+        self._analyzing = False     # the analysis runs off the tick path
+        # Early run: the one call starts the moment a message is seen, latest-wins. It
+        # carries the judgment too, so the settle window (~1 s) hides the whole latency and
+        # nothing is left to compute after the gate opens.
+        # Cost: a burst's intermediate messages each fire one discarded API call — cheap at
+        # glm-4-flash-class pricing, and superseded results are never consumed.
+        # 上游这里还有第二个常驻线程 _prejudge_loop：本地判断模型不要钱，所以消息一出现
+        # 就先判一遍，停稳时判断已经在手上了。判断合进这一次调用之后它没有独立的活可干，
+        # 整个删掉——判断跟着下面这个早跑一起回来。
+        self._pregen_req = None              # (text, context, tones tuple, reply epoch)
+        self._pregen_result = None           # (text, tones, gen dict, reply epoch)
+        self._pregen_running = False         # a pre-generation request is in flight
+        self._pregen_event = threading.Event()
+        threading.Thread(target=self._pregen_loop, daemon=True).start()
+        self._burst_left = BURST_READS       # short-cadence reads left after a change
+        self._stable_n = 0                   # consecutive unchanged reads since last change
+        self._collapsed = False
+        self._expanded_h = None       # full height, captured the first time we collapse
+        self._paused = False
+        # YOLO overlay default: JEV_BOXES=1 (or true/yes/on) in the env file starts it on;
+        # either way the menu-bar item flips it at runtime
+        self._show_boxes = userconfig.get("JEV_BOXES").strip().lower() in (
+            "1", "true", "yes", "on")
+        self._last_risk = None        # newest verdict's risk, for the overlay's highlight
+        self._chat_title = ""
+        self._asked_permission = False
+        self._win_wid = None          # sticky WeChat window id
+        self._wechat_frontmost = None # foreground boundary; False means capture state is stale
+        self._foreground_epoch = 0    # catches leave+return while one capture is in flight
+        self._read_fail_since = None  # debounce transient foreground capture failures
+        self._read_fail_hidden = False
+        self._last_origin = None      # last applied panel origin
+        self._pending_origin = None   # candidate origin awaiting confirmation
+        self._build_panel()
+        self._build_overlay()
+        self._expanded_h = self.panel.frame().size.height
+        return self
+
+    # ------------------------------------------------------------------ ui
+    @objc.python_method
+    def _build_panel(self):
+        # Closable/Miniaturizable are what actually CREATE the standard window buttons;
+        # NonactivatingPanel alone gives a title bar with no controls at all.
+        style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                 | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskNonactivatingPanel)
+        self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, PANEL_W, PANEL_H), style, NSBackingStoreBuffered, False)
+        self.panel.setLevel_(AppKit.NSFloatingWindowLevel)
+        self.panel.setOpaque_(False)
+        self.panel.setAlphaValue_(1.0)
+        self.panel.setHasShadow_(True)
+        # The title bar and button bezels are drawn from the appearance, not from the
+        # background colour, so pin Aqua: a dark-mode system would otherwise give a dark
+        # title bar above a white panel.
+        self.panel.setAppearance_(NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua))
+        self.panel.setBackgroundColor_(NSColor.clearColor())
+        self.panel.setTitle_("jev-jarvis")
+        self.panel.setHidesOnDeactivate_(False)
+        self.panel.setBecomesKeyOnlyIfNeeded_(True)
+
+        # NSVisualEffectView is the native implementation of the reference's light frosted
+        # material. The tint keeps text readable when the wallpaper behind it is busy.
+        view = AppKit.NSVisualEffectView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, PANEL_W, PANEL_H))
+        view.setMaterial_(getattr(
+            AppKit, "NSVisualEffectMaterialSidebar",
+            getattr(AppKit, "NSVisualEffectMaterialLight", 1)))
+        view.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
+        view.setState_(AppKit.NSVisualEffectStateActive)
+        view.setWantsLayer_(True)
+        view.layer().setBackgroundColor_(PALETTE["bg"].CGColor())
+        self.rows: dict[str, NSTextField] = {}
+
+        # The latest master adds model settings to this same header. Keep it as a quiet,
+        # standalone icon so the new control does not collide with the chat title.
+        self.settings_button = self._make_button(PANEL_W - 44, 0, 32, 32,
+                                                 "", "openSettings:", 0)
+        settings_icon = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "gearshape", "模型设置")
+        symbol_config = AppKit.NSImageSymbolConfiguration.configurationWithPointSize_weight_(
+            12, AppKit.NSFontWeightRegular)
+        settings_icon = settings_icon.imageWithSymbolConfiguration_(symbol_config)
+        self.settings_button.setImage_(settings_icon)
+        self.settings_button.setImagePosition_(AppKit.NSImageOnly)
+        self.settings_button.setImageScaling_(AppKit.NSImageScaleNone)
+        self.settings_button.setBordered_(False)
+        self.settings_button.setContentTintColor_(PALETTE["muted"])
+        self.settings_button.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
+        self.settings_button.layer().setBorderWidth_(0.0)
+        self.settings_button.setToolTip_("模型设置")
+        self.settings_button.setAccessibilityLabel_("模型设置")
+        self.settings_button.setHidden_(False)
+        view.addSubview_(self.settings_button)
+        self._fixed.append((self.settings_button, PANEL_W - 44, 4, 32, 32))
+
+        # Decorative surfaces are fixed; every string still comes from the existing rows.
+        for surface, x, top, w, h in (
+            (self._make_surface(12, PALETTE["surface"]), 14, 54, PANEL_W - 28, 62),
+            (self._make_surface(12, PALETTE["surface"]), 14, 124, PANEL_W - 28, 72),
+            (self._make_surface(10, PALETTE["surface"]), 14, 204, PANEL_W - 28, 34),
+        ):
+            view.addSubview_(surface)
+            self._fixed.append((surface, x, top, w, h))
+            self._detail_views.append(surface)
+
+        # Summary separators and static labels carry no model data; they only make the
+        # existing intent/risk/action fields scan like the approved design.
+        for x in (150, 260):
+            divider = self._make_surface(0, PALETTE["edge"])
+            view.addSubview_(divider)
+            self._fixed.append((divider, x, 136, 1, 46))
+            self._detail_views.append(divider)
+
+        action_label = self._make_label(0, 0, 58, 16, size=11,
+                                        color=PALETTE["text"], bold=True)
+        action_label.setStringValue_("具体行动")
+        view.addSubview_(action_label)
+        self._fixed.append((action_label, 26, 213, 58, 16))
+        self._detail_views.append(action_label)
+
+        risk_title = self._make_label(0, 0, 64, 14, size=9, color=PALETTE["muted"])
+        risk_title.setStringValue_("风险等级")
+        view.addSubview_(risk_title)
+        self._fixed.append((risk_title, 272, 132, 64, 14))
+        self._detail_views.append(risk_title)
+        for i, (title, color) in enumerate((
+            ("低", PALETTE["green"]), ("中", PALETTE["amber"]), ("高", PALETTE["red"]))):
+            center_x = 278 + i * 26
+            dot = self._make_surface(4, color.colorWithAlphaComponent_(0.68))
+            view.addSubview_(dot)
+            self._fixed.append((dot, center_x - 4, 152, 8, 8))
+            self._detail_views.append(dot)
+            self._risk_dots.append(dot)
+            label = self._make_label(0, 0, 20, 14, size=9, color=PALETTE["muted"])
+            label.setAlignment_(AppKit.NSTextAlignmentCenter)
+            label.setStringValue_(title)
+            view.addSubview_(label)
+            self._fixed.append((label, center_x - 10, 164, 20, 14))
+            self._detail_views.append(label)
+
+        for key, x, top, w, h, size, color, bold in (
+            ("chat", 20, 14, PANEL_W - 76, 20, 15, PALETTE["accent"], True),
+            ("status", 20, 36, PANEL_W - 40, 14, 10, PALETTE["muted"], False),
+            ("message", 26, 62, PANEL_W - 52, 30, 14, PALETTE["text"], False),
+            ("sender", 26, 96, PANEL_W - 52, 14, 10, PALETTE["muted"], False),
+            ("intent", 26, 136, 116, 26, 20, PALETTE["text"], True),
+            ("confidence", 26, 166, 116, 16, 11, PALETTE["muted"], False),
+            ("risk", 164, 137, 92, 24, 14, PALETTE["green"], True),
+            ("actions", 94, 213, 236, 16, 11, PALETTE["text"], False),
+        ):
+            tf = self._make_label(x, 0, w, h, size=size, color=color, bold=bold)
+            if key in {"message", "actions"}:
+                tf.cell().setWraps_(True)
+            view.addSubview_(tf)
+            self.rows[key] = tf
+            self._fixed.append((tf, x, top, w, h))
+            if key not in {"chat", "status"}:
+                self._detail_views.append(tf)
+
+        header = self._make_label(18, 0, PANEL_W - 36, 18,
+                                  size=12, color=PALETTE["text"], bold=True)
+        view.addSubview_(header)
+        self.rows["cand_header"] = header
+        self._set_candidate_header("候选回复（按合适度排序）")
+        self._fixed.append((header, 18, 250, PANEL_W - 36, 18))
+        self._detail_views.append(header)
+        self._group_top = 274
+
+        # ---- 话术 groups: each dropdown heads a group and its candidates sit underneath,
+        # so the tone is labelled by the thing that selects it. Every group's controls exist
+        # from the start; _relayout() decides which are on screen. The button tags are slot
+        # arithmetic (slot * PER_TONE + row) so they never shift when a group's results are
+        # still in flight.
+        tone_items = styles.labels() + [styles.NONE_LABEL]
+        for slot in range(styles.MAX_SLOTS):
+            group_box = self._make_surface(12, PALETTE["row"], PALETTE["edge"])
+            view.addSubview_(group_box)
+            self._group_boxes.append(group_box)
+
+            box = self._make_surface(8, PALETTE["field"], PALETTE["edge"])
+            view.addSubview_(box)
+            self._dd_boxes.append(box)
+
+            pop = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(0, 0, TONE_DD_W - 2 * TONE_DD_INSET, TONE_DD_H), False)
+            pop.setBordered_(False)          # <- no bezel, no accent-coloured chevron
+            # the one discoverability aid the flat field gets: grey-on-grey reads as text,
+            # a tooltip costs nothing visually and answers "can I click this?"
+            pop.setToolTip_("点这里换话术（每种一组，各出 2 条）")
+            pop.setFont_(NSFont.boldSystemFontOfSize_(TONE_DD_FONT))
+            pop.setContentTintColor_(PALETTE["text"])
+            pop.addItemsWithTitles_(tone_items)
+            pop.selectItemWithTitle_(self.slot_tones[slot])
+            pop.setTarget_(self)
+            pop.setAction_("toneChanged:")
+            view.addSubview_(pop)
+            self._dds.append(pop)
+
+            slot_rows = []
+            for row in range(styles.PER_TONE):
+                tag = slot * styles.PER_TONE + row
+                row_box = self._make_surface(8, PALETTE["row"], PALETTE["edge"])
+                row_box.setHidden_(True)
+                view.addSubview_(row_box)
+                prob = self._make_label(CAND_PROB_X, 0, CAND_PROB_W, 32,
+                                        size=10, color=PALETTE["green"], bold=True)
+                prob.cell().setWraps_(True)
+                text = self._make_label(CAND_TEXT_X, 0, CAND_TEXT_W, 18,
+                                        size=11, color=PALETTE["text"])
+                text.cell().setWraps_(True)
+                text.cell().setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+                if hasattr(text.cell(), "setMaximumNumberOfLines_"):
+                    text.cell().setMaximumNumberOfLines_(0)
+                copy_btn = self._make_button(CAND_BTN_X, 0, CAND_BTN_W, CAND_BTN_H,
+                                             "复制", "copyCandidate:", tag)
+                fill_btn = self._make_button(CAND_BTN_X + CAND_BTN_W + CAND_BTN_GAP, 0,
+                                             CAND_BTN_W, CAND_BTN_H, "填入", "fillCandidate:", tag)
+                track = self._make_surface(2, PALETTE["track"])
+                fill_bar = self._make_surface(2, PALETTE["green"])
+                track.setHidden_(True)
+                fill_bar.setHidden_(True)
+                for c in (prob, text, copy_btn, fill_btn, track, fill_bar):
+                    view.addSubview_(c)
+                slot_rows.append({"box": row_box, "prob": prob, "text": text,
+                                  "btn": copy_btn, "fill_btn": fill_btn,
+                                  "track": track, "fill": fill_bar})
+            self._rows.append(slot_rows)
+
+        self.panel.setContentView_(view)
+        self._title_h = self.panel.frame().size.height - PANEL_H   # measured, not assumed
+        self._relayout()
+        self.rows["status"].setStringValue_(IDLE_STATUS)
+        self._wire_window_controls()
+        self._install_status_item()
+
+    @objc.python_method
+    def _build_overlay(self):
+        """A transparent, click-through window aligned to WeChat: the YOLO-style view.
+
+        Pure visualization of what perception already returns — every message's bounding
+        box and its real OCR confidence, the judged one carrying intent+risk on its chip.
+        Three properties keep it safe: it is OFF by default (menu-bar toggle); clicks pass
+        through (`ignoresMouseEvents`), so WeChat never gets blocked; and perception
+        captures by window ID, so this window can never pollute our own OCR.
+        Coordinate mapping assumes the 1x nominal capture's pixel size equals the window's
+        point size — that is exactly what kCGWindowImageNominalResolution promises.
+        """
+        self._ov_panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, 200, 200), NSWindowStyleMaskBorderless,
+            NSBackingStoreBuffered, False)
+        self._ov_panel.setLevel_(AppKit.NSFloatingWindowLevel)
+        self._ov_panel.setOpaque_(False)
+        self._ov_panel.setHasShadow_(False)
+        self._ov_panel.setIgnoresMouseEvents_(True)   # never steal a click meant for WeChat
+        self._ov_panel.setHidesOnDeactivate_(False)
+        self._ov_panel.setBackgroundColor_(NSColor.clearColor())
+        view = _BoxesView.alloc().init()
+        view.boxes = []
+        self._ov_panel.setContentView_(view)
+
+    @objc.python_method
+    def _slot_active(self, slot: int) -> bool:
+        return self.slot_tones[slot] in styles.PRESETS
+
+    @objc.python_method
+    def _relayout(self):
+        """Place every control for the current tone selection and size the panel to fit.
+
+        Two things are computed here rather than at build time. Positions are measured from
+        the TOP, so when the panel grows or shrinks nothing above the change moves — only the
+        bottom edge does. And the height follows the groups in use: a slot on 不用 reserves
+        neither a dropdown's worth of rows nor its candidates, which is what removes the dead
+        space a fixed-height panel left in the middle.
+        """
+        dy = self._group_top
+        placements = []          # (control, x, dy_from_top, w, h)
+        for slot in range(styles.MAX_SLOTS):
+            active = self._slot_active(slot)
+            self._group_boxes[slot].setHidden_(not active)
+            group_top = dy
+            selector_top = dy + (GROUP_PAD_Y if active else 0)
+            placements.append((self._dd_boxes[slot], TONE_DD_X, selector_top,
+                               TONE_DD_W, TONE_DD_H))
+            placements.append((self._dds[slot], TONE_DD_X + TONE_DD_INSET, selector_top,
+                               TONE_DD_W - 2 * TONE_DD_INSET, TONE_DD_H))
+            dy = selector_top + TONE_DD_H
+            if active:
+                dy += TONE_DD_GAP
+            for row in range(styles.PER_TONE):
+                r = self._rows[slot][row]
+                controls = self._row_controls(slot, row)
+                if active:
+                    # The candidate decides its own height. Short replies keep the compact
+                    # minimum; longer localized text grows without truncation.
+                    text_h = self._candidate_text_height(r["text"])
+                    row_h = max(CAND_ROW_MIN_H, text_h + 12)
+                    text_top = dy + (row_h - text_h) / 2
+                    button_top = dy + (row_h - CAND_BTN_H) / 2
+                    metric_top = dy + (row_h - 40) / 2
+                    progress_w = max(0.0, min(36.0, r["fill"].frame().size.width))
+                    placements += [
+                        (r["box"], CAND_ROW_X, dy, CAND_ROW_W, row_h),
+                        (r["text"], CAND_TEXT_X, text_top, CAND_TEXT_W, text_h),
+                        (r["prob"], CAND_PROB_X, metric_top, CAND_PROB_W, 32),
+                        (r["btn"], CAND_BTN_X, button_top, CAND_BTN_W, CAND_BTN_H),
+                        (r["fill_btn"], CAND_BTN_X + CAND_BTN_W + CAND_BTN_GAP, button_top,
+                         CAND_BTN_W, CAND_BTN_H),
+                        (r["track"], CAND_PROB_X + 4, metric_top + 36, 36, 4),
+                        (r["fill"], CAND_PROB_X + 4, metric_top + 36, progress_w, 4),
+                    ]
+                    dy += row_h
+                    if row < styles.PER_TONE - 1:
+                        dy += CAND_ROW_GAP
+                else:
+                    for c in controls:
+                        c.setHidden_(True)
+            if active:
+                dy += GROUP_PAD_Y
+                placements.append((self._group_boxes[slot], 14, group_top,
+                                   PANEL_W - 28, dy - group_top))
+            if slot < styles.MAX_SLOTS - 1:
+                dy += GROUP_GAP
+
+        content_h = dy + BOTTOM_PAD
+        view = self.panel.contentView()
+        view.setFrameSize_(NSMakeSize(PANEL_W, content_h))
+        for ctrl, x, top, w, h in placements + self._fixed:
+            ctrl.setFrame_(NSMakeRect(x, content_h - top - h, w, h))
+
+        # resize the window with its TOP edge pinned: growing downwards is what the eye
+        # expects here, and _position_near() anchors the panel to WeChat's top anyway
+        f = self.panel.frame()
+        top = f.origin.y + f.size.height
+        frame_h = content_h + self._title_h
+        self.panel.setFrame_display_(
+            NSMakeRect(f.origin.x, top - frame_h, PANEL_W, frame_h), True)
+        self._expanded_h = frame_h
+
+    @objc.python_method
+    def _wire_window_controls(self):
+        """Native traffic lights, mapped to this app's actions.
+
+        red    -> quit. A hidden panel would otherwise be unreachable: LSUIElement apps
+                  have no Dock icon, so a plain order-out looks like a crash.
+        yellow -> roll the panel up instead of miniaturizing, for the same reason.
+        green  -> hidden: the HUD has a fixed size and nothing to zoom.
+        """
+        close = self.panel.standardWindowButton_(NSWindowCloseButton)
+        mini = self.panel.standardWindowButton_(NSWindowMiniaturizeButton)
+        zoom = self.panel.standardWindowButton_(NSWindowZoomButton)
+        if close:
+            close.setTarget_(self)
+            close.setAction_("quitApp:")
+            close.setToolTip_("退出 jev-jarvis")
+        if mini:
+            mini.setTarget_(self)
+            mini.setAction_("collapsePanel:")
+            mini.setToolTip_("收起 / 展开面板")
+        if zoom:
+            zoom.setHidden_(True)
+
+    @objc.python_method
+    def _install_status_item(self):
+        """Menu-bar item — the standard place for a background helper's controls."""
+        bar = AppKit.NSStatusBar.systemStatusBar()
+        self.status_item = bar.statusItemWithLength_(AppKit.NSVariableStatusItemLength)
+        self.status_item.button().setTitle_("J")
+        self.status_item.button().setToolTip_("jev-jarvis · 微信意图助手")
+
+        menu = AppKit.NSMenu.alloc().init()
+        for title, action, key in (
+            ("显示 / 收起面板", "collapsePanel:", ""),
+            ("暂停读屏", "togglePause:", ""),
+            ("YOLO 检测框", "toggleBoxes:", ""),
+            ("立即重新分析", "reanalyze:", ""),
+            ("模型设置…", "openSettings:", ","),
+        ):
+            menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
+        menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        menu.addItemWithTitle_action_keyEquivalent_("退出 jev-jarvis", "quitApp:", "q")
+        for item in menu.itemArray():
+            item.setTarget_(self)
+        self.pause_item = menu.itemArray()[1]
+        self.boxes_item = menu.itemArray()[2]
+        self.boxes_item.setState_(
+            AppKit.NSOnState if self._show_boxes else AppKit.NSOffState)
+        self.status_item.setMenu_(menu)
+
+    def openSettings_(self, sender):
+        from settings import SettingsController
+        if getattr(self, "settings_controller", None) and self.settings_controller.window.isVisible():
+            self.settings_controller.show()
+            return
+        try:
+            self.settings_controller = SettingsController.alloc().init().build()
+            self.settings_controller.show()
+        except OSError:
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("无法读取配置文件，请检查文件权限。")
+            alert.runModal()
+
+    @objc.python_method
+    def _make_surface(self, radius: float, color: NSColor,
+                      border: NSColor | None = None) -> NSView:
+        return ui_style.make_surface(radius, color, border)
+
+    @objc.python_method
+    def _make_label(self, x, y, w, h, size=13, color=None, bold=False):
+        return ui_style.make_label("", x, y, w, h, size, color, bold, selectable=True)
+
+    @objc.python_method
+    def _make_button(self, x, y, w, h, title, action, tag):
+        """Compact native action with a light outline over the vibrancy material."""
+        btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+        btn.setTitle_(title)
+        ui_style.style_button(btn, font_size=10, radius=CAND_BTN_H / 2)
+        btn.setTarget_(self)
+        btn.setAction_(action)
+        btn.setTag_(tag)
+        btn.setHidden_(True)
+        return btn
+
+    @objc.python_method
+    def _show(self):
+        if not self.panel.isVisible():
+            self.panel.orderFrontRegardless()
+
+    @objc.python_method
+    def _context_line(self, sender, prev: str) -> str:
+        parts = []
+        if sender:
+            parts.append(f"来自 {sender}")
+        if prev:
+            parts.append(f"上文：{prev[:26]}")
+        return " · ".join(parts)
+
+    @objc.python_method
+    def _render(self, key: str, text: str, color: NSColor | None = None):
+        tf = self.rows[key]
+        tf.setStringValue_(text)
+        if color is not None:
+            tf.setTextColor_(color)
+
+    @objc.python_method
+    def _set_candidate_header(self, text: str):
+        """Keep the section title strong while treating its live status as metadata."""
+        value = NSMutableAttributedString.alloc().initWithString_(text)
+        value.addAttributes_range_({
+            NSFontAttributeName: NSFont.systemFontOfSize_(12),
+            NSForegroundColorAttributeName: PALETTE["muted"],
+        }, NSMakeRange(0, len(text)))
+        title_len = min(len("候选回复"), len(text))
+        value.addAttributes_range_({
+            NSFontAttributeName: NSFont.boldSystemFontOfSize_(12),
+            NSForegroundColorAttributeName: PALETTE["text"],
+        }, NSMakeRange(0, title_len))
+        self.rows["cand_header"].setAttributedStringValue_(value)
+
+    @objc.python_method
+    def _set_probability_label(self, field: NSTextField, row: int, probability: str):
+        """Match the reference hierarchy: quiet rank, vivid bold probability."""
+        rank = f"#{row + 1}"
+        text = f"{rank}\n{probability}"
+        value = NSMutableAttributedString.alloc().initWithString_(text)
+        value.addAttributes_range_({
+            NSFontAttributeName: NSFont.systemFontOfSize_(9),
+            NSForegroundColorAttributeName: PALETTE["muted"],
+        }, NSMakeRange(0, len(text)))
+        value.addAttributes_range_({
+            NSFontAttributeName: NSFont.boldSystemFontOfSize_(11),
+            NSForegroundColorAttributeName: (
+                PALETTE["muted"] if probability in ("排序中", "待定") else PALETTE["green"]),
+        }, NSMakeRange(len(rank) + 1, len(probability)))
+        field.setAttributedStringValue_(value)
+
+    @objc.python_method
+    def _candidate_text_height(self, field: NSTextField) -> float:
+        """Measure the full rendered reply so layout never relies on a character cutoff."""
+        text = field.stringValue()
+        if not text:
+            return 18
+        attributed = NSAttributedString.alloc().initWithString_attributes_(
+            text, {NSFontAttributeName: field.font()})
+        options = (AppKit.NSStringDrawingUsesLineFragmentOrigin
+                   | AppKit.NSStringDrawingUsesFontLeading)
+        bounds = attributed.boundingRectWithSize_options_(
+            NSMakeSize(CAND_TEXT_W, 10_000), options)
+        return max(18, float(int(bounds.size.height + 4.999)))
+
+    @objc.python_method
+    def _set_progress(self, slot: int, row: int, value: float | None):
+        """Paint the existing rank probability; the model payload is never changed."""
+        r = self._rows[slot][row]
+        # 分不是数就当没有（画个空条），不硬转——float("很高") 会把整条链炸在界面线程上
+        usable = (isinstance(value, (int, float)) and not isinstance(value, bool)
+                  and isfinite(value))
+        progress = max(0.0, min(1.0, float(value))) if usable else 0.0
+        frame = r["fill"].frame()
+        r["fill"].setFrameSize_(NSMakeSize(36 * progress, frame.size.height or 4))
+
+    @objc.python_method
+    def _set_risk_scale(self, risk: int | None):
+        selected = None if risk is None else (0 if risk <= 3 else (1 if risk <= 6 else 2))
+        colors = (PALETTE["green"], PALETTE["amber"], PALETTE["red"])
+        for i, dot in enumerate(self._risk_dots):
+            layer = dot.layer()
+            layer.removeAnimationForKey_("risk-breathe")
+            alpha = 1.0 if i == selected else 0.68
+            layer.setBackgroundColor_(colors[i].colorWithAlphaComponent_(alpha).CGColor())
+            layer.setShadowOpacity_(0.0)
+            if i == selected:
+                layer.setShadowColor_(colors[i].CGColor())
+                layer.setShadowOffset_(NSMakeSize(0, 0))
+                layer.setShadowRadius_(4.0)
+                layer.setShadowOpacity_(0.55)
+                # Keep the dot itself fully saturated; only its halo breathes.
+                pulse = Quartz.CABasicAnimation.animationWithKeyPath_("shadowOpacity")
+                pulse.setFromValue_(0.24)
+                pulse.setToValue_(0.72)
+                pulse.setDuration_(1.2)
+                pulse.setAutoreverses_(True)
+                pulse.setRepeatCount_(float("inf"))
+                pulse.setTimingFunction_(Quartz.CAMediaTimingFunction.functionWithName_(
+                    Quartz.kCAMediaTimingFunctionEaseInEaseOut))
+                layer.addAnimation_forKey_(pulse, "risk-breathe")
+
+    @objc.python_method
+    def _row_controls(self, slot: int, row: int):
+        r = self._rows[slot][row]
+        return (r["box"], r["prob"], r["text"], r["btn"], r["fill_btn"],
+                r["track"], r["fill"])
+
+    @objc.python_method
+    def _render_groups(self, payload: list):
+        """payload: [(slot, tone, [{"text","prob"}, ...]), ...] — one entry per active tone.
+
+        Rows the model did not fill are emptied and their buttons hidden. Every active tone
+        still reserves its two minimum rows, while a returned long reply expands only its own
+        row so the complete text remains visible.
+        """
+        wanted = set()
+        for slot, _tone, items in payload:
+            for row in range(styles.PER_TONE):
+                if row < len(items):
+                    it = items[row]
+                    wanted.add((slot, row))
+                    r = self._rows[slot][row]
+                    prob = _prob_text(it["prob"])
+                    self._set_probability_label(r["prob"], row, prob)
+                    r["text"].setStringValue_(it["text"])
+                    self._set_progress(slot, row, it["prob"])
+                    for c in self._row_controls(slot, row):
+                        c.setHidden_(not self._slot_active(slot))
+                    self.cand_texts[slot * styles.PER_TONE + row] = it["text"]
+        for slot in range(styles.MAX_SLOTS):
+            for row in range(styles.PER_TONE):
+                if (slot, row) not in wanted and self._slot_active(slot):
+                    r = self._rows[slot][row]
+                    r["prob"].setStringValue_("")
+                    r["text"].setStringValue_("")
+                    self._set_progress(slot, row, None)
+                    for c in self._row_controls(slot, row):
+                        c.setHidden_(True)
+                    self.cand_texts[slot * styles.PER_TONE + row] = None
+        self._relayout()
+
+    @objc.python_method
+    def _clear_candidates(self):
+        for slot in range(styles.MAX_SLOTS):
+            for row in range(styles.PER_TONE):
+                r = self._rows[slot][row]
+                r["prob"].setStringValue_("")
+                r["text"].setStringValue_("")
+                self._set_progress(slot, row, None)
+                for c in self._row_controls(slot, row):
+                    c.setHidden_(True)
+                self.cand_texts[slot * styles.PER_TONE + row] = None
+
+    @objc.python_method
+    def _display_height(self) -> float:
+        """Height of the display whose origin is (0,0) — the Quartz<->Cocoa flip constant.
+
+        Taking this from the *target* screen is wrong on multi-display setups: a screen
+        placed above the main one has origin.y > 0 and the flip must still use the
+        primary display's height.
+        """
+        for scr in NSScreen.screens():
+            f = scr.frame()
+            if f.origin.x == 0 and f.origin.y == 0:
+                return f.size.height
+        return NSScreen.mainScreen().frame().size.height
+
+    @objc.python_method
+    def _position_near(self, win: dict | None):
+        """Dock the panel beside WeChat, on the screen WeChat is actually on.
+
+        Uses global Cocoa coordinates throughout. NSScreen.mainScreen() must NOT be used:
+        it follows whichever display holds the key window, so relying on it made the panel
+        hop ~1369 px between displays a few times a minute.
+        """
+        flip = self._display_height()
+        panel_h = self.panel.frame().size.height or PANEL_H
+        panel_w = self.panel.frame().size.width or PANEL_W
+        screens = list(NSScreen.screens())
+        primary = next((s for s in screens
+                        if s.frame().origin.x == 0 and s.frame().origin.y == 0), screens[0])
+
+        if win:
+            # CGWindow bounds are top-left origin global pixels -> Cocoa bottom-left
+            wx, wy = win["x"], win["y"]
+            ww, wh = win["w"], win["h"]
+            cx_win = wx + ww / 2.0
+            cyan = flip - (wy + wh / 2.0)
+            host = next((s for s in screens
+                         if s.frame().origin.x <= cx_win <= s.frame().origin.x + s.frame().size.width
+                         and s.frame().origin.y <= cyan <= s.frame().origin.y + s.frame().size.height),
+                        primary)
+            sf = host.frame()
+            # dock right of WeChat if it fits on that screen, else left, else its right edge
+            x = wx + ww + 8
+            if x + panel_w > sf.origin.x + sf.size.width:
+                x = wx - panel_w - 8
+            if x < sf.origin.x:
+                x = sf.origin.x + sf.size.width - panel_w - 12
+            y = flip - wy - panel_h
+            y = max(sf.origin.y + 40, min(y, sf.origin.y + sf.size.height - panel_h - 40))
+        else:
+            sf = primary.frame()
+            x = sf.size.width - panel_w - 12
+            y = sf.size.height - panel_h - 60
+
+        # dead-band: ignore sub-2pt corrections and one-off blips, so WeChat's own window
+        # animations (and our own numeric noise) stop nudging the panel around
+        target = (round(x), round(y))
+        last = self._last_origin
+        if last is None:                    # first placement: apply without debounce
+            self._last_origin = target
+            self._pending_origin = target
+            self.panel.setFrameOrigin_(target)
+            return
+        if abs(target[0] - last[0]) <= 2 and abs(target[1] - last[1]) <= 2:
+            return
+        if target != self._pending_origin:
+            self._pending_origin = target
+            return  # require the same target on two consecutive ticks before moving
+        self._last_origin = target
+        self.panel.setFrameOrigin_(target)
+
+    # ------------------------------------------------------------ actions
+    def copyCandidate_(self, sender):
+        text = self.cand_texts[sender.tag()] if 0 <= sender.tag() < len(self.cand_texts) else None
+        if not text:
+            return
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(text, NSPasteboardTypeString)
+        self._render("status", "已复制", PALETTE["green"])
+
+    def fillCandidate_(self, sender):
+        """Write the candidate into WeChat's input box (src/fill.py)."""
+        idx = sender.tag()
+        text = self.cand_texts[idx] if 0 <= idx < len(self.cand_texts) else None
+        if not text:
+            return
+        # The status line is painted before the call because writing into WeChat takes a
+        # beat; the click should look instant even though the write has not happened yet.
+        self._render("status", "填入中…", PALETTE["muted"])
+        self.panel.displayIfNeeded()
+        if not fill.has_accessibility():
+            # First click is the moment to ask: the system dialog is the only way in.
+            fill.request_accessibility()
+        target = getattr(self, "_input_target", None)
+        if target is None or (target["box"] is None and not target.get("visual_rect")):
+            self._render("status", "填入失败：" + (target["reason"] if target else "等待输入框定位"), PALETTE["red"])
+            return
+        ok, reason = fill.fill_text(text, target=target)
+        if ok:
+            self._render("status", reason, PALETTE["green"])
+        else:
+            self._render("status", f"填入失败：{reason}", PALETTE["red"])
+
+    def toneChanged_(self, sender):
+        """A 话术 dropdown moved: the verdict is still valid, only the writing changes."""
+        picked = [p.titleOfSelectedItem() or styles.NONE_LABEL for p in self._dds]
+        if picked == self.slot_tones:
+            return
+        self.slot_tones = picked
+        # the panel is sized by how many slots are in use, so re-lay-out *before* the new
+        # candidates arrive: the empty rows appear at once and nothing jumps later
+        self._clear_candidates()
+        self._stream_rows = {}     # the run _regenerate starts streams into fresh rows
+        self._regenerate()
+
+    @objc.python_method
+    def _regenerate(self):
+        """Re-run just the generation half for the message on screen.
+
+        No re-judging and no re-reading of the screen: the intent and risk do not depend on
+        the tone, and re-running them would make a dropdown click feel like a new analysis.
+
+        判断现在是同一次调用的副产物，所以换话术那次调用也会带回一份新判断——**扔掉**。
+        面板上的意图/风险仍然是这条消息那次分析的结论，点一下下拉框不会让它跳一下。
+        """
+        self._relayout()
+        text = self.analyzed_text
+        if not text:
+            self._render("status", "话术已选 · 下条消息生效", PALETTE["muted"])
+            return
+        active = [t for t in self.slot_tones if t in styles.PRESETS]
+        if not active:
+            self._render("status", "没选话术 · 至少选一个", PALETTE["amber"])
+            return
+        self._render("status", f"换话术中…（{'、'.join(active)}）", PALETTE["muted"])
+        self._set_candidate_header("候选回复 · 生成中…")
+        threading.Thread(target=self._reply_task,
+                         args=(self._reply_epoch, self._regen_work,
+                               text, list(self.slot_tones)),
+                         daemon=True).start()
+
+    @objc.python_method
+    def _payload_from_gen(self, gen: dict):
+        """Generation result -> unranked [(slot, tone, items)] (prob=None ⇒ 待排序).
+
+        None when nothing usable came back — the caller shows gen's error then.
+        """
+        groups = [g for g in (gen.get("groups") or []) if g.get("texts")]
+        if not groups:
+            return None
+        return [(g["slot"], g["tone"], [{"text": t, "prob": None} for t in g["texts"]])
+                for g in groups]
+
+    @objc.python_method
+    def _rank_payload(self, payload: list, scores: dict) -> list:
+        """Score and reorder each group's candidates. `#1`/`#2` inside a group still means
+        "the better of these two". Missing scores leave probabilities at 0 rather than
+        dropping rows.
+
+        上游这里再发一次网络/前向调用（judge.rank_candidates，把所有候选当选项问一道题）。
+        这一版的分是写候选那次调用自己给的，已经在 gen["scores"] 里了，所以这里只剩「按分
+        重排」这一件事——排法、缺分算 0、排完的形状都跟上游一模一样。
+        口径变了一处：上游那一道题看得见所有话术的候选，分跨话术可比；现在每次调用只看得见
+        自己写的两条，分是话术内的。组内先后不受影响，只有显示的百分比不再是同一把尺子。
+
+        分是模型自己报的，不保证是数：不是数的排到最后（sort 不能拿字符串比大小），
+        显示那一步再兜一次（_render_groups）。丢是不丢的——适配层原样递上来的值一直在。
+        """
+        def rank_key(item):
+            prob = item["prob"]
+            numeric = isinstance(prob, (int, float)) and not isinstance(prob, bool)
+            return (0 if numeric else 1, -prob if numeric else 0)
+
+        out = []
+        for slot, tone, items in payload:
+            scored = [{"text": it["text"], "prob": scores.get(it["text"], 0.0)}
+                      for it in items]
+            scored.sort(key=rank_key)
+            out.append((slot, tone, scored))
+        return out
+
+    @objc.python_method
+    def _stream_hook(self, t0: float, label: str = ""):
+        """The on_candidate callback for the generation run starting now.
+
+        Shared by all three run starters (_analyze, _run_generation, _regen_work) so the
+        streaming lines follow one epoch/rows discipline no matter which path produced
+        them. The callback runs on the run's worker thread; it hops to the main thread for
+        every UI touch, and the first line it sees logs the latency that streaming is here
+        for. The epoch check inside applyStreamLine_ is what makes a superseded run's late
+        lines harmless.
+        """
+        reply_epoch = getattr(self._reply_worker, "epoch", self._reply_epoch)
+        self._gen_epoch += 1
+        epoch = self._gen_epoch
+        prefix = f"{label} " if label else ""
+        first_line = {"shown": False}
+
+        def on_candidate(slot: int, _tone: str, text: str) -> None:
+            if not first_line["shown"]:
+                first_line["shown"] = True
+                _log(f"{prefix}首条候选上屏 {(time.perf_counter() - t0) * 1000:.0f}ms（未排序）")
+            self._push_reply("applyStreamLine:", (epoch, slot, text), reply_epoch)
+        return on_candidate
+
+    @objc.python_method
+    def _regen_work(self, text: str, slot_tones: list[str]):
+        t0 = time.perf_counter()
+        try:
+            if not self._reply_current():
+                return
+            # intent="" —— 判断不参与起草（上游线上调用点也一直传空），这次带回来的判断扔掉
+            gen = self.generator.generate(text, "", slot_tones, None,
+                                          self._stream_hook(t0, "换话术"))
+            groups = gen.get("groups") or []
+            failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
+            _log(f"换话术 生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms · {len(groups)} 个话术"
+                 + (f" · 失败: {'; '.join(failed)}" if failed else ""))
+            payload = self._payload_from_gen(gen)
+            if payload is None:
+                err = (gen.get("error") or "空结果")[:60]
+                _log(f"换话术无可用候选: {err}")
+                self._push("applyError:", f"候选生成失败: {err}")
+                return
+            # 上游在这里先推一次没排序的（界面显示「排序中」），排完再推一次。现在分跟候选
+            # 一起回来，没有中间态可推了——流式那一路的行早就上屏了，这一次就是带分的那次。
+            ranked = self._rank_payload(payload, gen.get("scores") or {})
+            _log(f"换话术 端到端 {(time.perf_counter() - t0) * 1000:.0f}ms")
+            self._push("applyTones:", ranked)
+        except Exception as e:
+            _log(f"换话术失败 {type(e).__name__}: {str(e)[:60]}")
+            self._push("applyError:", f"换话术失败: {type(e).__name__}: {str(e)[:40]}")
+
+    @objc.python_method
+    def _payload_current(self, payload) -> bool:
+        """False when the tone selection moved on — a late result must not repaint it.
+
+        Generation+ranking now pushes twice (unranked, then ranked); a dropdown click
+        between the two would otherwise bring back the tone the user just switched away
+        from. Same guard for a 换话术 result racing a second click.
+        """
+        return all(self.slot_tones[slot] == tone for slot, tone, _items in payload)
+
+    @objc.python_method
+    def _cand_header(self, payload) -> str:
+        pending = any(it["prob"] is None for _s, _t, items in payload for it in items)
+        return "候选回复 · 排序中…" if pending else "候选回复（按合适度排序）"
+
+    def applyTones_(self, payload):
+        if not self._payload_current(payload):
+            return
+        self._set_candidate_header(self._cand_header(payload))
+        total = sum(len(items) for _s, _t, items in payload)
+        self._render("status", f"已换话术 · {total} 条", PALETTE["muted"])
+        self._render_groups(payload)
+
+    # ------------------------------------------------------------ controls
+    def collapsePanel_(self, sender):
+        self._set_collapsed(not self._collapsed)
+
+    def togglePause_(self, sender):
+        self._paused = not self._paused
+        self.pause_item.setTitle_("继续读屏" if self._paused else "暂停读屏")
+        if self._paused:
+            self._pregen_req = None          # a paused app analyses nothing further
+            self._pregen_result = None
+            if self._ov_panel.isVisible():   # frozen boxes would lie about "realtime"
+                self._ov_panel.orderOut_(None)
+            self._render("status", "已暂停 · 不再读屏", PALETTE["amber"])
+            self._render("message", "", PALETTE["text"])
+            self._render("sender", "", PALETTE["muted"])
+            self._render("intent", "—", PALETTE["muted"])
+            self._render("confidence", "", PALETTE["muted"])
+            self._render("risk", "", PALETTE["muted"])
+            if hasattr(self, "_risk_dots"):
+                self._set_risk_scale(None)
+            self._render("actions", "", PALETTE["text"])
+            self.rows["cand_header"].setStringValue_("")
+            self._clear_candidates()
+        else:
+            self._pregen_result = None
+            self.last_seen = None      # force a fresh read of whatever is on screen
+            self.analyzed_text = None
+            self._render("status", "已恢复 · 读屏中", PALETTE["muted"])
+
+    def reanalyze_(self, sender):
+        self._pregen_req = None        # "re-analyze" means re-run, not reuse the early run
+        self._pregen_result = None
+        self.last_seen = None
+        self.analyzed_text = None
+        self._render("status", "重新分析中…", PALETTE["muted"])
+
+    def quitApp_(self, sender):
+        AppKit.NSApplication.sharedApplication().terminate_(None)
+
+    @objc.python_method
+    def _set_collapsed(self, collapsed: bool):
+        """Roll the panel up to a title+status strip, or back to full height."""
+        self._collapsed = collapsed
+        controlled = ["message", "sender", "intent", "confidence", "risk", "actions",
+                      "cand_header"]   # "chat" and "status" survive collapsing
+        for key in controlled:
+            self.rows[key].setHidden_(collapsed)
+        for view in self._detail_views:
+            view.setHidden_(collapsed)
+        for slot in range(styles.MAX_SLOTS):
+            self._dds[slot].setHidden_(collapsed)
+            self._dd_boxes[slot].setHidden_(collapsed)
+            self._group_boxes[slot].setHidden_(collapsed or not self._slot_active(slot))
+            for row in range(styles.PER_TONE):
+                has = self.cand_texts[slot * styles.PER_TONE + row] is not None
+                for c in self._row_controls(slot, row):
+                    c.setHidden_(collapsed or not has)
+        if not collapsed:
+            # re-expanding puts every control back where _relayout() wants it, and re-hides
+            # the slots that are switched off — the collapse above cannot know that
+            self._relayout()
+            self._last_origin = None      # let the next tick re-dock cleanly
+            return
+
+        rect = self.panel.frame()
+        # _expanded_h is maintained by _relayout() (it changes with the tone selection), so
+        # expanding reads the current full height rather than a value captured at startup
+        new_h = COLLAPSED_H if collapsed else (self._expanded_h or PANEL_H)
+        self.panel.setFrame_display_(
+            NSMakeRect(rect.origin.x, rect.origin.y + (rect.size.height - new_h),
+                       rect.size.width, new_h), True)
+        self._last_origin = None      # let the next tick re-dock cleanly
+
+    # --------------------------------------------------------------- loop
+    @objc.python_method
+    def _set_foreground_state(self, frontmost):
+        """Apply one hard lifecycle boundary when WeChat gains/loses focus."""
+        if frontmost is None or frontmost is self._wechat_frontmost:
+            return False
+
+        self._wechat_frontmost = frontmost
+        self._foreground_epoch += 1
+        self._reply_epoch += 1
+        self._reply_key = None
+        self.last_seen = None
+        self.analyzed_text = None
+        self._pregen_req = self._pregen_result = None
+        self._gen_epoch += 1
+        self._fingerprint = None
+        self._last_full = None
+        self._win_wid = None
+        self._input_target = None
+        self._input_window = None
+        self._input_next = 0
+        self._stable_n = 0
+        self._burst_left = BURST_READS
+        self._last_skip_reason = None
+        self._read_fail_since = None
+        self._read_fail_hidden = False
+
+        if frontmost:
+            self._next_read_ts = 0
+            _log("前台切换 · 微信回到前台，强制重新读屏")
+        else:
+            _log("前台切换 · 微信离开前台，隐藏面板并清空旧结果")
+            self._push("applyForegroundHidden:", "微信不在前台")
+        return True
+
+    def tick_(self, timer):
+        # Check activation before pause/busy/read-cadence gates.  The timer keeps
+        # firing while OCR is in flight, so a quick WeChat -> Chrome -> WeChat
+        # round trip still advances _foreground_epoch and retires that capture.
+        frontmost_is_wechat = frontmost_app_is_wechat()
+        if frontmost_is_wechat is None:
+            return
+        self._set_foreground_state(frontmost_is_wechat)
+        if not frontmost_is_wechat:
+            return
+        if self._paused or self._busy or time.time() < self._next_read_ts:
+            return  # paused, a previous read is still running, or not due yet
+        self._busy = True
+        threading.Thread(target=self._work, daemon=True).start()
+
+    @objc.python_method
+    def _work(self):
+        try:
+            self._work_inner()
+        finally:
+            self._busy = False
+
+    @objc.python_method
+    def _work_inner(self):
+        # The panel is a global floating window. Showing it over Chrome while continuing
+        # to reuse the last WeChat frame makes stale text look like browser OCR. Treat app
+        # activation as a hard display/capture boundary before even checking permissions:
+        # a missing screen grant must not keep an error panel floating over other apps.
+        frontmost_is_wechat = frontmost_app_is_wechat()
+        if frontmost_is_wechat is None:
+            # A transient NSWorkspace failure is not proof that the user left WeChat.
+            # Freeze both reads and UI updates for one short tick without cancelling a
+            # valid in-flight reply or manufacturing a leave/return transition.
+            self._next_read_ts = time.time() + FAST_TICK
+            return
+        self._set_foreground_state(frontmost_is_wechat)
+        if not frontmost_is_wechat:
+            self._next_read_ts = time.time() + FAST_TICK
+            return
+        if not screen_capture_ok():
+            if not self._asked_permission:
+                self._asked_permission = True
+                request_screen_capture()      # opens the system prompt
+            self._push("applyError:", "需要屏幕录制权限 · 系统设置 › 隐私与安全性")
+            self._next_read_ts = time.time() + SLOW_TICK
+            return
+        capture_foreground_epoch = self._foreground_epoch
+        try:
+            res = read_conversation(previous_wid=self._win_wid,
+                                    prev_fingerprint=self._fingerprint)
+        except Exception as e:
+            self._push("applyError:", f"读取失败: {type(e).__name__}: {str(e)[:40]}")
+            self._next_read_ts = time.time() + SLOW_TICK
+            return
+        # Re-check after the blocking capture/OCR.  tick_ may have observed a
+        # complete leave+return while this worker was busy; in that case even a
+        # currently-frontmost WeChat does not make this old snapshot current.
+        frontmost_is_wechat = frontmost_app_is_wechat()
+        if frontmost_is_wechat is None:
+            self._next_read_ts = time.time() + FAST_TICK
+            return
+        self._set_foreground_state(frontmost_is_wechat)
+        if (not frontmost_is_wechat
+                or capture_foreground_epoch != self._foreground_epoch):
+            self._next_read_ts = time.time() + FAST_TICK
+            return
+        if not res["ok"]:
+            # Window enumeration/capture can miss one frame while WeChat redraws.
+            # Keep the already-current HUD stable for a short grace period, then
+            # hide and force rediscovery if the failure really persists.
+            now_mono = time.monotonic()
+            if self._read_fail_since is None:
+                self._read_fail_since = now_mono
+            if (not self._read_fail_hidden
+                    and now_mono - self._read_fail_since >= READ_FAILURE_HIDE_S):
+                self._read_fail_hidden = True
+                # A persistent miss is no longer a harmless one-frame redraw.
+                # Retire every reply callback before hiding; otherwise an in-flight
+                # generation from the last visible frame could call _show() again.
+                self._reply_epoch += 1
+                self._reply_key = None
+                self.last_seen = None
+                self.analyzed_text = None
+                self._pregen_req = self._pregen_result = None
+                self._gen_epoch += 1
+                self._fingerprint = None
+                self._last_full = None
+                self._win_wid = None
+                self._push("applyForegroundHidden:", res["error"])
+            self._next_read_ts = time.time() + FAST_TICK
+            return
+
+        self._read_fail_since = None
+        self._read_fail_hidden = False
+
+        # Same fingerprint ⇒ same pixels ⇒ the messages are exactly what we last read.
+        # Cadence follows the screen: quiet checks back in FAST_TICK (capture+hash only,
+        # ~30 ms); a change first keeps BURST_TICK for a few reads so the burst's NEXT
+        # message is noticed quickly (this also feeds _stable_n, the early-settle signal),
+        # and only a pane that keeps moving settles back to SLOW_TICK like the old poll.
+        self._fingerprint = res.get("fingerprint")
+        if res["unchanged"]:
+            self._stable_n += 1
+            self._burst_left = BURST_READS
+            self._next_read_ts = time.time() + FAST_TICK
+        elif self._burst_left > 0:
+            self._burst_left -= 1
+            self._stable_n = 0
+            self._next_read_ts = time.time() + BURST_TICK
+        else:
+            self._stable_n = 0
+            self._next_read_ts = time.time() + SLOW_TICK
+
+        # position immediately: analysis takes seconds, and a delayed correction
+        # showed up as a visible jump after the verdict landed. Pushed on unchanged
+        # frames too — the window can move while its pixels stay identical.
+        live_window = res["window"]
+        self._win_wid = res["window"]["wid"]
+        self._push("applyPosition:", res["window"])
+        if res["unchanged"] and self._last_full is not None:
+            # the settle/analyze gate below still runs every read; an unchanged frame
+            # just skips re-deriving the messages it would act on
+            res = self._last_full
+        else:
+            self._last_full = res
+            self._push("applyChat:", res.get("chat_title") or "")
+
+        res = dict(res, window=live_window)
+        # AX traversal stays on the read worker, never the Cocoa drawing thread.
+        now_input = time.monotonic()
+        if (res["window"] != getattr(self, "_input_window", None)
+                or now_input >= getattr(self, "_input_next", 0)):
+            self._input_target = fill.locate_input(res["window"])
+            if self._input_target["box"] is None:
+                from input_region import locate_visual_input
+                self._input_target["visual_rect"] = locate_visual_input(res["window"])
+                if self._input_target["visual_rect"]:
+                    from visual_fill import chat_signature
+                    self._input_target["chat_signature"] = chat_signature(res["window"], self._input_target["visual_rect"])
+            self._input_window = dict(res["window"])
+            self._input_next = now_input + 1.0
+        msgs = res["messages"]
+        thems = [m for m in msgs if m.side == "them"]
+        newest = thems[-1] if thems else None
+        prev_text = thems[-2].text if len(thems) > 1 else ""
+
+        key = (res.get("chat_title") or "", newest.text) if newest else None
+        if key != self._reply_key:
+            self._reply_epoch += 1
+            self._reply_key = key
+            self.last_seen = None
+            self.analyzed_text = None
+            self._pregen_req = self._pregen_result = None
+            self._gen_epoch += 1
+
+        # YOLO overlay: repaint whenever a read produced geometry — unchanged reads reuse
+        # the cached messages, so the boxes stay up even while the pane is quiet
+        if self._show_boxes:
+            self._push("applyBoxes:", (res["window"], msgs,
+                                       newest.text if newest else None))
+        if newest is None:
+            self._push("applyWaiting:", None)
+            return
+        now = time.time()
+
+        # --- anti-flood: track arrivals, never analyze mid-burst
+        if newest.text != self.last_seen:
+            self.last_seen = newest.text
+            self.last_change_ts = now
+            # only on arrival: this function runs every second, and a per-tick line would
+            # bury the timing that matters
+            t = res.get("timing_ms") or {}
+            first_read = not self._read_once
+            self._read_once = True
+            # Vision loads on the first call and costs ~2x steady state; saying so keeps a
+            # one-off from being read as a regression (same reason the judge line does it)
+            note = "（首次，含 Vision 加载）" if first_read and t.get("ocr", 0) > 400 else ""
+            # say when the fast in-process capture was refused: otherwise a permanent
+            # fallback looks like ordinary slowness instead of something to report
+            slow_cap = " · 抓屏走了子进程（进程内被抓图接口拒绝）" \
+                if t.get("capture_path") == "subprocess" else ""
+            _log(f"读屏 抓取 {t.get('capture', 0):.0f}ms + OCR {t.get('ocr', 0):.0f}ms"
+                 f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）"
+                 f"{note}{slow_cap}")
+            _log(f"新消息 · 这次调用先跑，停稳 {SETTLE_S}s（连续 {STABLE_READS} 跳不变最早 "
+                 f"{EARLY_SETTLE_S}s）后上屏（两次完整分析最小间隔 {MIN_GAP_S}s）")
+            # latest-wins: fire now, supersede on the next arrival, spend at settle.
+            # Tones are captured here — a dropdown click during the window invalidates the
+            # result at consumption time (checked in _take_pregen). 上游这里还要再起一个
+            # 预判请求（本地判断模型，不花钱所以每条都判）；判断现在就在这一次调用里。
+            self._pregen_req = (newest.text, self._context_text(msgs, newest),
+                                tuple(self.slot_tones), self._reply_epoch)
+            self._pregen_result = None
+            self._pregen_event.set()
+            # keep the previous verdict readable; just badge that something new landed
+            self._push("applyIncoming:", (newest.text, newest.sender, prev_text))
+
+        # Anti-flood, two signals: the blind wait (SETTLE_S, unchanged upper bound) or a
+        # content-stability early open — the pane went quiet for STABLE_READS consecutive
+        # reads spanning at least EARLY_SETTLE_S, which is itself evidence the burst is
+        # over. A burst keeps resetting _stable_n, so mid-burst opens cannot happen.
+        elapsed = now - self.last_change_ts
+        settled = elapsed >= SETTLE_S or (elapsed >= EARLY_SETTLE_S
+                                          and self._stable_n >= STABLE_READS)
+        cooled = (now - self.last_analyze_ts) >= MIN_GAP_S
+        pg = self._pregen_result
+        # 上游这里看的是「预判结论在不在手上」（判断是免费的本地前向，所以总是先判）。
+        # 判断合进这一次调用之后，手上有没有东西只有一个问题：早跑那份结果在不在。
+        # 在 = 这次分析的钱已经付过了，不用再等冷却；话术也得对得上，不然那份结果本来就作废。
+        pre_hit = (pg is not None and pg[0] == newest.text
+                   and pg[1] == tuple(self.slot_tones) and pg[3] == self._reply_epoch)
+        if (newest.text != self.analyzed_text and settled and not self._analyzing
+                and (pre_hit or cooled)):
+            self.last_analyze_ts = now
+            self.analyzed_text = newest.text
+            self._analyzing = True
+            if pre_hit:
+                # 结果已经在手上，_analyze 直接取走就上屏；「分析中…」只会闪一下，不推。
+                _log(f"停稳 · 早跑已就位 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
+            else:
+                _log(f"开始分析 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
+                self._push("applyPending:", (newest.text, newest.sender, prev_text))
+            # off the tick path on purpose: the call takes over a second, and while it runs
+            # the loop must keep reading — a message landing mid-analysis used to wait the
+            # whole analysis out before anyone even saw it
+            threading.Thread(target=self._reply_task,
+                             args=(self._reply_epoch, self._run_analysis,
+                                   newest, msgs, prev_text), daemon=True).start()
+        elif newest.text != self.analyzed_text:
+            # the wait is deliberate; say so once per arrival change so "it feels slow" can
+            # be told apart from "it is still waiting out the burst window"
+            why = ("消息还在变" if not settled else
+                   "上一条还在分析" if self._analyzing else
+                   f"距上次分析不足 {MIN_GAP_S}s")
+            if self._last_skip_reason != why:
+                self._last_skip_reason = why
+                _log(f"暂不分析（{why}）")
+        else:
+            self._last_skip_reason = None
+
+    @objc.python_method
+    def _run_analysis(self, newest, msgs, prev_text: str):
+        try:
+            if not self._reply_current():
+                return
+            self._analyze(newest, msgs, prev_text)
+        except Exception as e:
+            _log(f"分析失败 {type(e).__name__}: {str(e)[:60]}")
+            self._push("applyError:", f"分析失败: {type(e).__name__}: {str(e)[:40]}")
+        finally:
+            self._analyzing = False
+
+    @objc.python_method
+    def _pregen_loop(self):
+        """Run the call the moment a message is seen — judgment and candidates both.
+
+        One resident worker, latest-wins: a burst overwrites the slot, so one call per
+        arrival rather than one per tick, and a result survives only if its text is still
+        the newest when the call returns. 上游这里只是「生成那一半」，判断另有一个
+        _prejudge_loop 并排跑（本地前向）；合成一次之后这就是唯一的一条早跑线。
+        """
+        while True:
+            try:
+                self._pregen_event.wait()
+                self._pregen_event.clear()
+                req = self._pregen_req
+                self._pregen_req = None
+                if req is None:
+                    continue
+                text, context, tones, epoch = req
+                if self._paused or text != self.last_seen or epoch != self._reply_epoch:
+                    continue          # superseded while queued: only the newest text counts
+                self._pregen_running = True
+                gen = None
+                try:
+                    gen = self.generator.generate(text, "", list(tones), context)
+                except Exception:
+                    gen = None        # a failed early run just means the settle path regenerates
+                # store BEFORE clearing _pregen_running, so _take_pregen never observes
+                # "not running" without the result already visible
+                if (gen is not None and not self._paused and text == self.last_seen
+                        and epoch == self._reply_epoch):
+                    self._pregen_result = (text, tones, gen, epoch)
+                self._pregen_running = False
+            except Exception:
+                self._pregen_running = False
+
+    @objc.python_method
+    def _take_pregen(self, text: str, tones: tuple) -> tuple[dict | None, float]:
+        """Collect the early generation: (gen, waited_ms). gen=None ⇒ caller generates.
+
+        A stored result counts only when BOTH the text and the tone selection match — the
+        text because a newer message retired it, the tones because a dropdown click during
+        the window changed what should be generated. While a matching request is in flight
+        we wait for it (it started ~1 s ago at detection, so what is left is usually a few
+        hundred ms — still cheaper than a fresh call, and free of a second TLS handshake).
+        """
+        t0 = time.perf_counter()
+        deadline = time.time() + 30   # generation's own timeout; never wait longer
+        while time.time() < deadline:
+            if not self._reply_current():
+                return None, (time.perf_counter() - t0) * 1000
+            r = self._pregen_result
+            if (r is not None and r[0] == text and r[1] == tones
+                    and r[3] == self._reply_epoch):
+                self._pregen_result = None      # spent: each result is consumed exactly once
+                return r[2], (time.perf_counter() - t0) * 1000
+            if (not self._pregen_running
+                    and (self._pregen_req is None or self._pregen_req[0] != text)):
+                return None, (time.perf_counter() - t0) * 1000
+            time.sleep(0.03)
+        return None, (time.perf_counter() - t0) * 1000
+
+    @objc.python_method
+    def _gen_with_pregen(self, text: str, context: str | None,
+                         on_candidate=None) -> dict:
+        """Generate, preferring an early run already in flight or finished (full path).
+
+        The hook only reaches the fresh call: an early-run hit already has all its lines,
+        and _finish_generate paints them as soon as the result is in hand.
+        """
+        tones = tuple(self.slot_tones)
+        gen, _waited = self._take_pregen(text, tones)
+        if not self._reply_current():
+            return {"groups": []}
+        if gen is None:
+            gen = self.generator.generate(text, "", list(tones), context, on_candidate)
+        return gen
+
+    @objc.python_method
+    def _context_text(self, msgs, newest, turns: int = CONTEXT_TURNS) -> str | None:
+        """The last few turns, each prefixed with who said it — shared by both halves.
+
+        The names are the point. The judge used to receive a jumble of lines with no
+        speaker, which in a group chat throws away the most useful clue available: who is
+        talking, and whether the last thing said was mine. One-to-one chats render no name
+        above the bubble, so 我/对方 stands in.
+
+        上游两半各取各的深度：生成要整条对话线索（CONTEXT_TURNS），判断是单独一次前向、
+        prompt 每次重付，所以只给两轮（JUDGE_TURNS）。合成一次之后只有一份 prompt，
+        判断跟着生成一起看 CONTEXT_TURNS 那几轮——比上游多，且不多花一分钱。
+
+        The message under judgment is excluded **by identity**, not by position: `newest` is
+        the last message from the other side, which is not the same as the last element of
+        `msgs` (my own replies come after it).
+        """
+        prior = [m for m in msgs if m is not newest][-turns:]
+        if not prior:
+            return None
+        return "\n".join(
+            f"{m.sender or {'me': '我', 'them': '对方'}.get(m.side, '方向未确认')}: {m.text}"
+            for m in prior)
+
+    @objc.python_method
+    def _analyze(self, newest, msgs, prev_text: str = ""):
+        """One call: judgment first on screen, then the candidates.
+
+        Runs on its own thread (started by _work_inner): it takes over a second and must
+        not hold the read loop hostage.
+
+        上游这里是一个 2 线程的池子：判断（本地前向或云端 Jev）和生成真并行，判断通常
+        先回、先上屏，候选晚一秒左右跟上。合成一次之后没有可并行的东西了——判断和候选是
+        同一份回答的两部分。**这是这次合并唯一一处面板变慢的地方**：意图/风险不再比候选
+        早到，两边一起出现。换来的是少一次调用、少一把 key，以及判断能看到 4 轮上下文。
+        推的顺序仍然是判断在前、候选在后，applyJudgment_ 照旧负责起新一轮候选的行号。
+        """
+        t0 = time.perf_counter()
+        context = self._context_text(msgs, newest)
+        # 早跑命中就直接用那份结果（判断也在里面）；没命中才现发一次，那一次才走流式回调
+        gen = self._gen_with_pregen(newest.text, context, self._stream_hook(t0))
+        verdict = gen.get("verdict")
+        if verdict is not None:
+            _log(f"判断 → {verdict.get('intent', '?')}"
+                 f" 把握 {_confidence_text(verdict) or '?'}"
+                 f" 风险 {verdict.get('risk', '?')}（与候选同一次调用）")
+            self._push("applyJudgment:", (verdict, newest.sender, prev_text))
+        else:
+            # 判断没读出来（模型漏了、或者整段 JSON 废了）。候选照常上屏——上游判断调用
+            # 挂了也是这个效果：面板留着候选，状态行说判断这次没出来。
+            _log("判断失败: 这次回答里没有 judgment")
+            self._push("applyError:", "判断失败: 模型这次没给出意图/风险")
+        self._finish_generate(gen, t0)
+
+    @objc.python_method
+    def _finish_generate(self, gen: dict, t0: float, note: str = ""):
+        """Log the generation and push the candidates, ordered by the scores that came
+        back with them.
+
+        上游这里先推一次没排序的（界面显示「排序中」），再发一次判断模型的排序调用，
+        排完再推一次。这一版分跟候选是同一次调用回来的，没有中间态可推，也没有第二次
+        调用可发——流式那一路的行早就上屏了（applyStreamLine_，显示「排序中」），
+        这一次推的就是带分、已排好的那版。非流式那一家（anthropic 形状）这次仍是首次上屏。
+        """
+        if not self._reply_current():
+            return
+        groups = gen.get("groups") or []
+        failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
+        _log(f"生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms{note} · {len(groups)} 个话术并发"
+             f" → {sum(len(g['texts']) for g in groups)} 条候选"
+             + (f" · 失败: {'; '.join(failed)}" if failed else ""))
+        payload = self._payload_from_gen(gen)
+        if payload is None:
+            err = (gen.get("error") or "空结果")[:60]
+            _log(f"生成无可用候选: {err}")
+            self._push("applyError:", f"候选生成失败: {err}")
+            return
+        ranked = self._rank_payload(payload, gen.get("scores") or {})
+        _log(f"端到端 {(time.perf_counter() - t0) * 1000:.0f}ms"
+             f" · 从分析开始到候选上屏")
+        self._push("applyCandidates:", ranked)
+
+    @objc.python_method
+    def _push(self, selector: str, payload=None):
+        if selector in {"applyIncoming:", "applyPending:", "applyJudgment:",
+                        "applyCandidates:", "applyStreamLine:", "applyWaiting:", "applyError:"}:
+            epoch = getattr(self._reply_worker, "epoch", self._reply_epoch)
+            self._push_reply(selector, payload, epoch)
+            return
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(selector, payload, False)
+
+    @objc.python_method
+    def _reply_task(self, epoch, callback, *args):
+        self._reply_worker.epoch = epoch
+        try:
+            return callback(*args)
+        finally:
+            del self._reply_worker.epoch
+
+    @objc.python_method
+    def _reply_current(self):
+        return (self._wechat_frontmost is True
+                and self._reply_key is not None and not self._paused
+                and getattr(self._reply_worker, "epoch", self._reply_epoch) == self._reply_epoch)
+
+    @objc.python_method
+    def _push_reply(self, selector, payload, epoch):
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "applyReplyUpdate:", (epoch, selector, payload), False)
+
+    def applyReplyUpdate_(self, update):
+        epoch, selector, payload = update
+        if self._wechat_frontmost is not True or epoch != self._reply_epoch:
+            return
+        if selector not in {"applyWaiting:", "applyError:"} and not self._reply_current():
+            return
+        getattr(self, selector.replace(":", "_"))(payload)
+
+    def applyWaiting_(self, _payload):
+        self._show()
+        self._last_intent = ""
+        self._last_risk = None
+        self._clear_candidates()
+        self._stream_rows = {}
+        for key in ("message", "sender", "intent", "confidence", "risk", "actions"):
+            self._render(key, "", PALETTE["muted"])
+        if hasattr(self, "_risk_dots"):
+            self._set_risk_scale(None)
+        if hasattr(self, "_set_candidate_header"):
+            self._set_candidate_header("候选回复")
+        else:
+            # Lightweight test harnesses load this callback without constructing AppKit.
+            self.rows["cand_header"].setStringValue_("候选回复")
+        self._render("status", "等待可确认的对方消息…", PALETTE["muted"])
+
+    # --- main-thread callbacks (AppKit is not thread safe)
+    def applyChat_(self, title):
+        self._chat_title = title
+        self._render("chat", title, PALETTE["accent"])
+
+    def applyIncoming_(self, payload):
+        # a new message landed but we are not analysing yet (burst in progress):
+        # keep the previous verdict visible, just badge it
+        text, sender, prev = payload
+        self._show()
+        self._render("status", "有新消息 · 等消息停稳…", PALETTE["muted"])
+        self._render("message", text, PALETTE["muted"])   # grey: not analysed yet
+        self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
+
+    def applyPending_(self, payload):
+        text, sender, prev = payload
+        self._show()
+        self._render("status", "分析中…", PALETTE["muted"])
+        self._render("message", text, PALETTE["text"])    # inked: this is the one
+        self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
+        self._clear_candidates()
+        self._stream_rows = {}     # a new run starts at line zero in every slot
+        self._set_candidate_header("候选回复 · 等待判断…")
+
+    def applyJudgment_(self, payload):
+        v, sender, prev = payload
+        self._show()
+        intent = _judgment_text(v.get("intent"))
+        # kept so the overlay can label the message it judged; a verdict with no usable
+        # intent leaves it empty, which is what switches the badge off (see applyBoxes_)
+        self._last_intent = "" if intent == "暂未判断" else intent
+        self._last_risk = v.get("risk")      # raw: every reader guards it for itself
+        self._render("message", v.get("message", ""), PALETTE["text"])
+        self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
+        # 上游这里还有一支「本地兜底 · …」：云端 Jev 挂了会切到本地 decider-2b，状态行
+        # 得说清是谁给的结论。现在判断和候选是同一个模型，backend 就是那个模型名。
+        backend = v.get("backend", "")
+        if isinstance(backend, str) and backend.strip():
+            self._render("status", f"分析完成 · {backend.strip()}", PALETTE["muted"])
+        else:
+            self._render("status", "分析完成", PALETTE["muted"])
+        self._render("intent", intent, PALETTE["text"])
+        # the intent recognition rate, read off the judged intent — same muted slot
+        confidence = _confidence_text(v)
+        self._render("confidence", f"意图识别率 {confidence}" if confidence else "",
+                     PALETTE["muted"])
+        # Rounded, so the panel does not claim a precision it has: a judge that reports a
+        # mean like 4.7 out of a 10-level distribution reads as a measurement at "4.7/9"
+        # and as the estimate it is at "5/9". (上游的本地模型给的就是均值，理由是它的
+        # argmax 在几条意思相近的「批评」上会跳 1/3/6，而均值稳定；通用模型直接给档位，
+        # 这一行的读法照旧不变。)
+        risk = _risk_level(v.get("risk"))
+        if risk is None:
+            self._render("risk", "风险待判断", PALETTE["muted"])
+        else:
+            label = "安全" if risk <= 3 else ("留神" if risk <= 6 else "危险")
+            color = PALETTE["green"] if risk <= 3 else (
+                PALETTE["amber"] if risk <= 6 else PALETTE["red"])
+            self._render("risk", f"● {label}  {risk}/9", color)
+        if hasattr(self, "_risk_dots"):
+            self._set_risk_scale(risk)
+        self._render("actions", _actions_text(v), PALETTE["text"])
+        self._set_candidate_header("候选回复 · 生成中…")
+        # the verdict landing starts a new candidate run: without this reset, the streamed
+        # line counters left over from the previous message would eat every new line
+        # (applyStreamLine_ drops rows beyond PER_TONE) — only applyPending_ and
+        # toneChanged_ used to reset it, and the pre-judged path goes through neither
+        self._stream_rows = {}
+
+    def applyCandidates_(self, payload):
+        if not self._payload_current(payload):
+            return
+        self._set_candidate_header(self._cand_header(payload))
+        self._render_groups(payload)
+
+    def applyStreamLine_(self, payload):
+        """One streamed candidate line, shown the moment it completes (not ranked yet).
+
+        applyCandidates_ re-fills every row with scores when the full result lands, so the
+        "#n" here is only "nth line of this tone" and the score slot reads as pending. A
+        superseded run's lines are dropped by the epoch check — a tone change or a new
+        message starting mid-stream must not write into the new run's rows.
+        """
+        epoch, slot, text = payload
+        if epoch != self._gen_epoch or not self._slot_active(slot):
+            return
+        row = self._stream_rows.get(slot, 0)
+        if row >= styles.PER_TONE:
+            return                       # the prompt asks for PER_TONE lines; extras stray
+        self._stream_rows[slot] = row + 1
+        self.cand_texts[slot * styles.PER_TONE + row] = text
+        if self._collapsed:
+            return      # collapse keeps the data; _set_collapsed(False) puts it back up
+        r = self._rows[slot][row]
+        self._set_probability_label(r["prob"], row, "排序中")
+        r["text"].setStringValue_(text)
+        self._set_progress(slot, row, None)
+        for c in self._row_controls(slot, row):
+            c.setHidden_(False)
+        self._relayout()
+
+    def applyError_(self, text):
+        self._show()                       # never vanish without telling the user why
+        self._render("status", text, PALETTE["red"])
+
+    def applyHidden_(self, reason):
+        # WeChat gone or unreadable -> take the panel away (the app "opens with WeChat")
+        self._render("status", reason, PALETTE["muted"])
+        if self.panel.isVisible():
+            self.panel.orderOut_(None)
+        if self._ov_panel.isVisible():
+            self._ov_panel.orderOut_(None)
+
+    def applyForegroundHidden_(self, reason):
+        """Hide a global panel without leaving stale conversation state behind."""
+        self._last_intent = ""
+        self._last_risk = None
+        self._stream_rows = {}
+        self._chat_title = ""
+        self._clear_candidates()
+        for key in ("chat", "message", "sender", "intent", "confidence", "risk", "actions"):
+            self._render(key, "", PALETTE["muted"])
+        self.rows["cand_header"].setStringValue_("候选回复")
+        self.applyHidden_(reason)
+
+    def applyPosition_(self, win):
+        if self._wechat_frontmost is not True:
+            return
+        self._position_near(win)
+
+    # --- YOLO overlay callbacks (visual only; see _build_overlay)
+    def applyBoxes_(self, payload):
+        """Repaint the overlay from the last read's window geometry + messages."""
+        if self._wechat_frontmost is not True or not self._show_boxes:
+            return
+        win, msgs, newest_text = payload
+        W, H = win["w"], win["h"]
+        flip = self._display_height()
+        # top-left (Quartz) -> bottom-left (Cocoa), covering WeChat exactly
+        self._ov_panel.setFrame_display_(
+            NSMakeRect(win["x"], flip - win["y"] - H, W, H), False)
+        font = (NSFont.fontWithName_size_("Menlo-Bold", 10)
+                or NSFont.boldSystemFontOfSize_(10))
+        judged = (newest_text is not None and newest_text == self.analyzed_text
+                  and bool(self._last_intent))
+        risk = _risk_level(self._last_risk)
+        boxes = []
+        for m in msgs:
+            if m.w <= 0:
+                continue               # pre-overlay geometry: nothing to draw
+            who = m.sender or {"them": "对方", "me": "我"}.get(m.side, "方向未确认")
+            label = f"{who} {m.conf:.2f}"
+            if judged and m.side == "them" and m.text == newest_text:
+                # 风险读不出来（模型没给 / 给的不是数）就只挂意图，颜色退回普通那一档——
+                # 不按 0 处理，那等于替模型说「安全」
+                color = (PALETTE["green"] if risk is None or risk <= 3 else
+                         PALETTE["amber"] if risk <= 6 else PALETTE["red"])
+                lw = 2.5
+                label += f" · {self._last_intent}" + ("" if risk is None else f" 风险{risk}/9")
+            else:
+                color = _rgb(0x576B95) if m.side == "me" else PALETTE["green"]
+                lw = 1.5
+            chip = NSAttributedString.alloc().initWithString_attributes_(
+                label,
+                {NSFontAttributeName: font,
+                 NSForegroundColorAttributeName: NSColor.whiteColor(),
+                 NSBackgroundColorAttributeName: color.colorWithAlphaComponent_(0.85)})
+            y = H - (m.y + m.h) * H     # normalized top-origin -> view bottom-origin
+            boxes.append((NSMakeRect(m.x * W, y, m.w * W, m.h * H), color, lw, chip))
+        target = getattr(self, "_input_target", None)
+        if target and target["window"] == win and target["rect"]:
+            x, y, w, h = target["rect"]
+            color = _rgb(0x2478DD)
+            rect = NSMakeRect(x-win["x"], H-(y-win["y"])-h, w, h)
+            label = target["reason"]
+        elif target and target["window"] == win and target.get("visual_rect"):
+            x, y, w, h = target["visual_rect"]
+            color = PALETTE["amber"]
+            rect = NSMakeRect(x-win["x"], H-(y-win["y"])-h, w, h)
+            label = "虚线：视觉输入区 · 点击填入后校验（不发送）"
+        else:
+            color = PALETTE["amber"]
+            rect = NSMakeRect(12, 12, 0, 0)
+            label = "输入框：" + (target["reason"] if target else "定位中…")
+        chip = NSAttributedString.alloc().initWithString_attributes_(label, {
+            NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.whiteColor(),
+            NSBackgroundColorAttributeName: color.colorWithAlphaComponent_(0.85)})
+        boxes.append((rect, color, 2.0, chip, bool(target and target.get("visual_rect") and not target["rect"])))
+        view = self._ov_panel.contentView()
+        view.boxes = boxes
+        view.setNeedsDisplay_(True)
+        if not self._ov_panel.isVisible():
+            self._ov_panel.orderFrontRegardless()
+
+    def toggleBoxes_(self, sender):
+        """Menu-bar switch; JEV_BOXES=1 in the env file makes it start on instead."""
+        self._show_boxes = not self._show_boxes
+        self.boxes_item.setState_(
+            AppKit.NSOnState if self._show_boxes else AppKit.NSOffState)
+        if not self._show_boxes and self._ov_panel.isVisible():
+            self._ov_panel.orderOut_(None)
+
+    # --------------------------------------------------------------- warm-up
+    @objc.python_method
+    def _warm(self):
+        """Pay the one-off load in the background: Vision OCR.
+
+        The first real message used to carry it (~0.7 s); starting it here, right after
+        launch, moves it to idle time. The OCR warm-up is independent of WeChat entirely
+        (a blank canvas, not a window).
+
+        上游这里还要预热判断模型：本地 decider-2b 第一次加载 9–15 秒（含下载可能是几分钟），
+        所以面板要显示「判断模型加载中…」、失败了还要红字提示，#37 那台 16GB 的机器就是
+        在这一步被系统干掉的（judge.low_memory_reason 的内存守卫也是为它写的）。判断合进
+        那一次网络调用之后，本地没有任何东西要加载——整段没了，连带 WARM_STATUS、
+        applyWarmDone_、applyWarmFailed_ 和那个内存守卫。
+        """
+        ocr_ms = warm_ocr()
+        if ocr_ms >= 0:
+            self._read_once = True    # Vision's one-off load is paid; first read is steady-state
+            _log(f"预热 OCR 就绪 · {ocr_ms:.0f}ms")
+        else:
+            _log("预热 OCR 失败 · 首次读屏会稍慢，不影响使用")
+
+
+def warn_if_no_generation_key() -> None:
+    """Say it out loud at launch when there is no key behind the one call.
+
+    上游这句话是「候选那一半没 key」：判断跑在本地，不配 key 也有意图和风险，所以面板
+    只是候选区空着。合成一次之后这把 key 是整个面板的前提——没有它，意图、风险、具体行动
+    和候选一起空着。One dialog at launch is the cheapest way to say so — it cannot be
+    missed the way a line of grey text in a floating panel can.
+
+    OPENAI_* and ANTHROPIC_* are two ways to configure the same generation layer, so this
+    fires only when NEITHER is set: either one on its own is a complete configuration.
+    A packaged build also carries a shared default (src/builtin.py), so this dialog only
+    appears when that default was deliberately emptied out.
+
+    Drawn with osascript rather than NSAlert, which was measured to not work here: an
+    accessory app cannot activate itself (NSApp.isActive stays False after
+    activateIgnoringOtherApps_), and an NSAlert stayed isVisible=False even inside its own
+    modal session — so the user would get nothing to click while the app sat in a modal
+    loop, i.e. an app that looks hung. osascript's dialog belongs to a process that can
+    activate, and Popen does not wait, so a dialog nobody dismisses cannot stall us.
+    """
+    if load_credentials()[1]:
+        return
+    path = str(userconfig.ENV_FILE).replace(str(Path.home()), "~")
+    # AppleScript string escapes (\n) work inside the literal; keep it free of double quotes
+    script = (
+        'display alert "还没配 Key，面板会是空的" message "'
+        "这一版判断和候选是同一次调用，所以意图、风险和候选回复都要它。\\n\\n"
+        f"在下面的文件里填这两组中的任意一组（二选一即可），然后重启本应用：\\n{path}\\n\\n"
+        "    OPENAI_API_KEY      （任意 OpenAI 兼容端点，如 DeepSeek）\\n"
+        '    ANTHROPIC_API_KEY   （任意 Anthropic 兼容端点，如智谱）" as informational'
+    )
+    try:
+        subprocess.Popen(["osascript", "-e", script],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass          # no osascript: the panel still shows the hint in the candidate area
+
+
+def main() -> None:
+    app = AppKit.NSApplication.sharedApplication()
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    warn_if_no_generation_key()
+    controller = HudController.alloc().init()
+    # First line of every run: which backends are actually in play. Support requests
+    # always need it, and it proves the log is live before the first message arrives.
+    _base, _key, _model, _src, _api = load_credentials()
+    _log(f"启动 · 判断+候选同一次调用 "
+         f"{(_base + ' / ' + _model) if _key else '未配置 Key（面板会是空的）'}"
+         + ("（内置默认）" if _src == BUILTIN_SOURCE else "")
+         + (" · YOLO 框开" if controller._show_boxes else ""))
+    controller._show()
+    # Warm Vision OCR while the panel is idle, so the user's first message pays only
+    # steady-state costs. 上游这里还要预热本地判断模型；这一版没有本地模型可预热。
+    threading.Thread(target=controller._warm, daemon=True).start()
+    timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+        FAST_TICK, controller, "tick:", None, True)
+    AppKit.NSRunLoop.currentRunLoop().addTimer_forMode_(timer, AppKit.NSDefaultRunLoopMode)
+    app.run()
+
+
+if __name__ == "__main__":
+    main()

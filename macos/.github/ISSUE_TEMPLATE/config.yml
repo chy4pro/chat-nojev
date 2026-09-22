@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用说明与已知限制
+    url: https://github.com/jev-chat/jev-chat-jarvis-mac/blob/master/README.md
+    about: 用法、配置（两层 LLM 的 key 放哪）、面板怎么读、已知限制，提 issue 前建议先看这里

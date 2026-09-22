@@ -23,6 +23,37 @@ provider having no counterpart here.
 
 Everything else in `windows/` is the upstream Windows application.
 
+`android/` is the same change applied to the Android original: one call to an
+ordinary LLM replaces the separate judgment model there too. The judgment
+result stays the typed `Analysis` / `Choice` / `Score` object the overlay reads
+field by field, the question set is unchanged, the overlay's three tables
+translating the classifier's English keys into Chinese are removed for the same
+reason `_CHOICES` was, and the two parallel analysis calls become one. The
+upstream `apk/` binary was not copied. See `android/docs/EQUIVALENCE.md`.
+
+`macos/` is the same change applied to the macOS sister project, which is not a
+port of either of the others and asks a different question set: two questions
+in Chinese, an intent over eight labels and a risk over ten levels. It had two
+judgment models — a local decoder (`Mapika/decider-2b`) and the cloud TypeSafe
+Jev — and a third call that ranked the candidates; all three are now the same
+call that writes the replies, one per tone, run concurrently as upstream runs
+them. The verdict the panel reads keeps its keys and its values. **The local
+judge is deleted**, and with it the ability to judge offline with no key: that
+is a loss of function, not only of a model, and it is recorded at the top of
+`macos/src/questions.py` along with what it would take to restore. The intent
+is answered as a short phrase in the language of the conversation instead of
+one of the eight fixed labels, so the panel shows the model's own wording; the
+labels and their descriptions still frame the question. The `actions` row, a
+static table keyed by that label upstream (`ACTION_MAP`, with a comment saying
+no generation is involved), is written by the model in the same call, and the
+upstream table is carried over verbatim as the example the prompt shows it. The
+validation the upstream judge client performed on its way out — the label
+lookup, the numeric coercions and the substitutions for a missing value — is
+not reproduced in the adapter; the panel guards each value where it renders it
+instead. The settings page has two model sections instead of three, and
+`torch`, `transformers`, `huggingface-hub` and `laya` are no longer
+dependencies. See `macos/docs/EQUIVALENCE.md`.
+
 Upstream copyright notices
 --------------------------
 
@@ -30,7 +61,8 @@ Reproduced verbatim from the LICENSE file of each upstream repository, as the
 MIT licence requires.
 
 From https://github.com/jev-chat/jev-chat-jarvis (Jev 聊天助手, Android — the
-original; the question set and judgment taxonomy originate here):
+original; the question set and judgment taxonomy originate here, and it is the
+direct source of `android/`):
 
     MIT License
 
@@ -44,16 +76,20 @@ the direct source of `windows/`):
     Copyright (c) 2026 rezoch340 and the jev-chat contributors
     Portions Copyright (c) 2026 Finderchangchang and the jev-chat contributors (Jev 聊天助手, https://github.com/jev-chat/jev-chat-jarvis)
 
-From the macOS sister project (jev-chat-jarvis-mac):
+From https://github.com/jev-chat/jev-chat-jarvis-mac (jev-chat-jarvis, macOS —
+the direct source of `macos/`):
 
     MIT License
 
     Copyright (c) 2026 eatmoreduck
 
 Each of those projects is MIT licensed. The full permission notice and
-warranty disclaimer, carrying the first two copyright lines above, are in
-`windows/LICENSE`, copied verbatim from jev-chat-windows. (This repository has
-no LICENSE file of its own yet, although README.md points at one.)
+warranty disclaimer are in `windows/LICENSE` (copied verbatim from
+jev-chat-windows, carrying the first two copyright lines above), in
+`android/LICENSE` (copied verbatim from jev-chat-jarvis, carrying the first)
+and in `macos/LICENSE` (copied verbatim from jev-chat-jarvis-mac, carrying the
+third). (This repository has no LICENSE file of its own yet, although
+README.md points at one.)
 
 Terms inherited from upstream
 -----------------------------
@@ -66,4 +102,8 @@ Terms inherited from upstream
   authors. This repository is not affiliated with them.
 - `windows/NOTICE` carries the upstream third-party component list, including
   the PySide6-Fluent-Widgets GPLv3 terms that bind any built Windows release
-  package. Those terms are unchanged here.
+  package. Those terms are unchanged here. `android/NOTICE` is jev-chat-jarvis's
+  own NOTICE, copied verbatim.
+- jev-chat-jarvis-mac ships a LICENSE but no NOTICE, so `macos/NOTICE` is this
+  repository's own: it carries the upstream attribution and states what this
+  variant changed.
