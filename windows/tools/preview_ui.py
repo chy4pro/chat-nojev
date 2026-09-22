@@ -120,7 +120,7 @@ def main() -> int:
         settings,
         has_key=lambda: bool(demo_settings["llm_key"]),
         has_llm_key=lambda: bool(demo_settings["llm_key"]),
-        llm_key=lambda: demo_settings["llm_key"],
+        llm_key=lambda provider="": demo_settings["llm_key"],
         relationship=lambda: demo_settings["relationship"],
         context=lambda: demo_settings["context"],
         draft_provider=lambda: demo_settings["draft_provider"],

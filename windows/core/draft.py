@@ -374,7 +374,8 @@ def draft_and_judge(messages: list, relationship: str, provider: str = "deepseek
         user += f"\n\n这是群聊。你要回复的是「{reply_to}」的话，三条候选都对 TA 说，不要@别人。"
     user += ("\n\n输出那一个 JSON 对象：replies 恰好 3 条，best_reply 点名其中一条，"
              "reply_scores 给每条一个 0~1 的分，judgment 给 7 个字段。")
-    key = _api_key(LLM_ENV)  # 全程只有这一把 key，换来源不用重填
+    # 全程只有这一把 key，换来源不用重填；它空着才退回这家自己的惯用变量，所以来源要传进去
+    key = _api_key(LLM_ENV, provider)
     # 1.2：DeepSeek 自己推荐的闲聊档位，0.8 出来的话太板正
     # max_tokens：上游是 400（三句话够了）/ 4000（思考过程也算进 max_tokens）。判断跟着一起回来之后，
     # 光 judgment 七个字段带概率表就装不下 400，截断了整个对象都废，所以这一档抬到 1600；

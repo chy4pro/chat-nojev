@@ -3,15 +3,46 @@
 微信（Windows 4.x）旁挂的回复辅助：本地 OCR 读屏上的对话 → 一次模型调用同时给出判断和 3 条候选回复 →
 一键填入微信输入框。**发送永远手动，程序不替你按发送。**
 
-> **这一份是 chat-nojev 的改版，脱胎自 [jev-chat-windows](https://github.com/jev-chat/jev-chat-windows)。**
-> 它把判断和排序交给专门的判断模型（TypeSafe Jev），起草另算一次调用；这里把两次合成一次——
+> **这一份是 [jev-chat-windows](https://github.com/jev-chat/jev-chat-windows) 的派生（[chat-nojev](../README.md)），只改了一件事。**
+> 原版把判断和排序交给专门的判断模型（TypeSafe Jev），起草另算一次调用；这里把两次合成一次——
 > 同一个语言模型写候选、答那 7 道判断题、并点名哪条最好。题目原文、选项集合、0–9 的紧张度档位
 > 一个字没改（见 `core/questions.py`），界面读到的字段也一模一样，**只是产出方换了**。
-> 因此 `confidence` / `probabilities` 现在是模型的自评，不是它那种校准过的概率。
-> 配置上少了一把 key：全程只有 `LLM_API_KEY`。
+> 因此 `confidence` / `probabilities` 现在是模型的自评，不是它那种校准过的概率；
+> 配置上少了一把 key，全程只有 `LLM_API_KEY`。这道接缝有一套差分测试对着原版逐字段盯着，
+> 判据和逐场景结果见 [`docs/EQUIVALENCE.md`](docs/EQUIVALENCE.md)——**那是关于这一处的证据，不是对这个程序的质量判断**。
+>
+> **其余全是原版的代码**：截屏、OCR、起草的提示词、悬浮窗、填入微信、「不替你按发送」那条边界，
+> 连同原版的 bug 和粗糙处一起留着。这一版没有审过这些代码，也没有跑过——见下面「不是原版的地方」
+> 和每个下载块里的那句话。
 
 采集这一侧来自安卓版 [Finderchangchang/jev-chat-JARVIS](https://github.com/Finderchangchang/jev-chat-JARVIS)
 的 Windows 改写：窗口截图 + 离线 OCR。
+
+## 不是原版的地方
+
+「只改了一件事」不完全是真的。合并本身带来的改动（删掉判断那一路的客户端、配置和设置页那一节）不算，
+剩下的全在这里；仓库根的 [README](../README.md#只改一件事不成立的地方) 里三个变体一起列。
+
+- **选择题的答案不再是固定的英文标签。** 原版由分类器作答，只能从封闭的 key 集合里挑，`app/overlay.py`
+  拿 `_CHOICES` 翻成固定的中文；这一版让模型用**对话那门语言**写一句短语，那张表删了，面板显示模型
+  写的那句。**这一条不是合并逼出来的**——完全可以让模型照旧吐英文 key。选它的理由见根 README。
+  代价：常见情况下用词跟原版很接近但不逐字相同，英文对话显示英文。数值不受影响。
+- **更新检查关掉了。** 原版启动时（可关）查一次 `api.github.com/repos/jev-chat/jev-chat-windows`
+  ——那是**原版自己的** Release 页，版本号跟这里的代码不是一回事，查到「有新版」只会把人导去装
+  另一个程序。现在 `app/update.py` 的 `_REPO` 留空，一个请求都不发。设置页那个开关和标题栏的提示条
+  还在代码里，现在是死路，**还没清理**。
+- **`max_tokens` 400 → 1600（思考模式 4000 → 5200）。** 400 是只写三句话的量，判断和概率表跟着回来
+  就会被截断，整个 JSON 作废。方向上躲不掉，具体数字是拍的。
+- **`core/llm.py` 加了 JSON 模式**（OpenAI `response_format` / Gemini `response_mime_type`，端点不认
+  就脱掉重发）。不是非加不可，但这一版要的是一个结构化对象而不是纯文本，加上它更稳；默认关着。
+- **key 的回退改成认来源了。** jev-chat-windows 里 `LLM_API_KEY` 空着就退到 `DEEPSEEK_API_KEY`，
+  不看你选的是哪家——只设了 DeepSeek key 却选 OpenRouter 的人，会把 DeepSeek 的 key 发给 OpenRouter
+  （它那边 `JEV_API_KEY` 退到 `OPENROUTER_API_KEY` 也一样，判断渠道选 TypeSafe 直连照退不误）。
+  这一版把惯用变量名写在每家来源自己那一行，只有选中这家时才拿它当回退；没有公认惯例的几家留空。
+  脱敏名单反过来是**更宽**的，六个名字全遮，不管这次会不会读它——解析要窄、脱敏要宽，两张表不能合并。
+  代价是明的：只设了 `DEEPSEEK_API_KEY` 又选了别家的人，从「悄悄能用（key 发错家）」变成「未配置」。
+- **`docs/KICKOFF.md` 被就地改了。** 那是原版立项时写的说明，按理该原样留着。
+- **截图没重拍。** 下面那几张 `docs/*.png` 还是原版的图，上面是它那套固定中文标签和两节模型卡片。
 
 ## 下载即用（推荐）
 
@@ -71,6 +102,9 @@ DeepSeek 官方 API（`api.deepseek.com`）国内直连，基本就是一次 HTT
 
 ## 截图
 
+> 这三张是 **jev-chat-windows 的原图**，没有重拍：设置页还是两节模型卡片，面板上还是它那套固定的
+> 中文标签。布局没变，变的是那几处文字和少掉的一节。
+
 <table>
 <tr>
 <td width="33%"><img src="docs/ui_home.png" alt="回复建议"></td>
@@ -101,8 +135,8 @@ DeepSeek 官方 API（`api.deepseek.com`）国内直连，基本就是一次 HTT
 - **参考上下文条数**：3~30，默认 10，那一次调用按它取最近 N 条。
 - **说话风格**：一句话描述自己的口吻，补在「照着你最近发的消息模仿」之上。
 - **响应式悬浮窗**：置顶、可拖可缩，最小 320×360，窄于 400 进紧凑模式。
-- **新版本提示**：启动时（可关）查一次 GitHub 最新版本号，有新版本会在标题栏下面出现一条提示，
-  点「去下载」跳转 Release 页。
+- ~~**新版本提示**~~：原版启动时（可关）查一次 GitHub 最新版本号并在标题栏下面提示。
+  **这一版关着**（见上面「不是原版的地方」），设置里那个开关打开也不会发请求。
 
 ## 隐私与边界
 
@@ -120,20 +154,23 @@ DeepSeek 官方 API（`api.deepseek.com`）国内直连，基本就是一次 HTT
   就是十分钟零 token。
 - **API key 只进环境变量，而且全程只有一个。** `LLM_API_KEY`，不管来源选哪家都是这一个槽。
   写进注册表 `HKCU\Environment`（跟 `setx` 同一个地方），任何文件里都不出现 key，也绝不进日志
-  （报错文本一律脱敏）。老版本的 `DEEPSEEK_API_KEY` 仍然能读到，保存一次就迁到新名字上。
+  （报错文本一律脱敏）。这个槽空着时，会退回**当前选中那家**自己的惯用变量——选 DeepSeek 读
+  `DEEPSEEK_API_KEY`、选 OpenRouter 读 `OPENROUTER_API_KEY`，以此类推（没有公认惯例的那几家没有
+  回退）。只认选中的那一家：拿 A 家的 key 去调 B 家的接口，是把密钥发给了不该拿到它的一方。
+  回退读到的值留在原处，不会被抄进 `LLM_API_KEY`——一抄就又变成跟着你换来源走的全局 key 了。
   原版那把判断模型的 `JEV_API_KEY` 这一版用不上了，设置页也不再问它。
-- **启动时查一次版本号（可关）。** 只向 GitHub Releases API 发一个 GET，带的只有 UA 和当前版本号，
-  不夹带任何聊天内容；设置里「启动时检查更新」关掉就完全不发这个请求，源码直接跑（没有版本号）也
-  不会发。
+- **不查更新。** 原版启动时会向 GitHub Releases API 发一个 GET 查版本号；这一版把它关掉了
+  （`app/update.py` 的 `_REPO` 留空），因为那个地址指着 jev-chat-windows 自己的 Release。
+  设置页「启动时检查更新」那个开关还在，打开也不发请求。
 
 什么会出网：只有那一次调用（`LLM_API_KEY`），发给你
 在设置里选的那家接口（DeepSeek 官网、OpenRouter、OpenAI、Moonshot、智谱、通义、硅基流动、
-Anthropic、Gemini，或者自填的 OpenAI 兼容 / Anthropic 兼容地址），加上启动时（可关）一次到
-GitHub 查版本号。**本项目没有任何自建服务器**，聊天内容只在触发分析的那一刻，发给你自己在设置里
+Anthropic、Gemini，或者自填的 OpenAI 兼容 / Anthropic 兼容地址）。原版还会在启动时查一次版本号，
+这一版连这个请求也没有。**本项目没有任何自建服务器**，聊天内容只在触发分析的那一刻，发给你自己在设置里
 配置的那个接口，本项目不收集、不落盘、不进日志。发出去的内容固定是：**最近 N 条对话文本**（N =
 设置里的「参考上下文」，默认 10；群聊带发言人名）、**关系设置**、**你自己最近 12 条 60 字以内的短
 消息**（当口吻样本，链接和长段不送）、**你填的说话风格**，群聊指定了回复对象的话再加一个对象名。
-除此之外没有别的。OCR 全程离线。GitHub 版本查询只带 UA 和当前版本号，不夹带任何聊天内容。
+除此之外没有别的。OCR 全程离线。
 
 **会不会因此被微信封号？** 本项目不 hook、不注入、不读微信的数据库或进程内存、不调用微信的任何
 私有接口或账号体系——只截自己这一个窗口的画面做 OCR，跟读屏软件、录屏软件是同一类操作。
@@ -236,8 +273,8 @@ DeepSeek / OpenRouter / Anthropic / Gemini 认。模型只给出 1~2 条候选�
 普通使用请直接用上面的[下载即用](#下载即用推荐)。想改代码、调 prompt、自己打包才需要这一节。
 
 ```bash
-git clone https://github.com/jev-chat/jev-chat-windows.git
-cd jev-chat-windows
+git clone https://github.com/chy4pro/chat-nojev.git
+cd chat-nojev/windows
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
@@ -273,7 +310,7 @@ pyinstaller --noconfirm --clean jev.spec
 | 说话风格（可选） | 一句话描述自己的口吻，只影响候选；留空就只靠最近消息模仿 | `config.json` → `style` |
 | 参考上下文 | 那一次调用看最近多少条消息，3~30 | `config.json` → `context`（默认 10） |
 | 群聊指定回复对象 | 开了群聊里才有「回复对象」那一行，候选针对 TA 写 | `config.json` → `reply_target`（默认关） |
-| 启动时检查更新 | 开了才在启动时查一次 GitHub 最新版本号，有新版本就在标题栏下面提示 | `config.json` → `check_update`（默认开） |
+| 启动时检查更新 | **这一版不生效**（更新检查关着，见「不是原版的地方」）；开关和字段原样留着 | `config.json` → `check_update`（默认开） |
 | 起草 · 来源 | 上面那张表里的任意一家 | `config.json` → `draft_provider`（默认 `deepseek`） |
 | 起草 · Base URL | 只有两个「自定义」来源才出现这一行 | `config.json` → `draft_base_url` |
 | 起草 · 密钥 | 上面选哪家就填哪家的 key。已配置时留空 = 保留 | 注册表 `HKCU\Environment` → `LLM_API_KEY` |
@@ -380,15 +417,18 @@ config.json             你自己的设置，不进仓库（在 .gitignore 里�
 - `confidence` / `probabilities` 现在是模型自评，不是校准过的概率，代码里就地注明了
 - 适配层不再校验模型给的值（原先会查标签表、夹分数范围、把每条的分归一化）：只搬键，值原样递下去。
   判断合不合法由 `core/engine.py` 和悬浮窗决定——它们本来就防着原版那个判断模型。逐键比对见
-  `docs/EQUIVALENCE.md`（15 个场景全部一致）
+  `docs/EQUIVALENCE.md`（15 个场景，除 `usage` 外每个键都一致；那是关于这一处接缝的证据）
 - 3 道 choice 题改成让模型用**对话那门语言**写一句短语（题目里的英文 key 和判据没动，只是不再照抄
   key 作答），`app/overlay.py` 里那张英文标签→中文的 `_CHOICES` 对照表随之删掉，`_choice` 原样显示
   模型写的那句话；缺值才「暂未判断」。代价是普通情况下的用词不再跟原版逐字相同，
   好处是面板跟着对话的语言走
 - 配置去掉判断那一路：删掉 `core/jev_client.py`、`JEV_PROVIDERS`、`JEV_API_KEY`，设置页只剩一节模型
 - `core/llm.py` 加 JSON 模式（OpenAI `response_format` / Gemini `response_mime_type`），
-  地址不认就脱掉重发一次
+  地址不认就脱掉重发一次；`max_tokens` 400 → 1600（思考模式 4000 → 5200），判断跟着回来 400 装不下
 - 新增 `tools/offline_check.py`：不联网，把坏形状的模型输出喂一遍，验解析器和 `analyze()` 的结果
+- 更新检查关掉（`app/update.py` 的 `_REPO` 留空）：原来那个地址指着 jev-chat-windows 自己的 Release
+- `docs/KICKOFF.md` 就地改了那几处「两把 key」的说法
+- key 的回退改成认来源：惯用变量名跟着来源走，不再跨家顶替；脱敏名单更宽，六个名字全遮
 
 **未发版（原版）**
 - 设置页「模型」卡片：判断 · Jev（OpenRouter / TypeSafe 直连）+ 起草 · 语言模型（11 家预设 + 自定义

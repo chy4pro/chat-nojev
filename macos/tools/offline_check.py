@@ -242,6 +242,44 @@ def main() -> int:
     assert out["scores"] == {REPLIES[0]: 3, REPLIES[1]: 7}   # 不归一、不转类型
     assert render_prob(7) == "700%"                          # 面板只是照着显示
 
+    print("\n数组分 + 空候选：按模型原序配对，不按 texts 的位置错位")
+    print("  （直接跑 generate._scores_by_text，覆盖之前 zip(texts, raw) 会错位的那几种排布）:")
+    A, B = "先这样", "后这样"
+
+    # 空候选夹在中间：texts 里空条目已经被丢掉，raw 数组还是模型写的原长度。
+    obj = {"replies": [A, "", B], "reply_scores": [0.1, 0.2, 0.3]}
+    texts = generate.Generator._replies(obj, "")
+    assert texts == [A, B]                                   # 空条目确实被 _replies 丢了
+    assert generate._scores_by_text(obj, texts) == {A: 0.1, B: 0.3}   # B 拿自己的 0.3，不是 0.2
+
+    # 空的是第一条
+    obj = {"replies": ["", A, B], "reply_scores": [0.1, 0.2, 0.3]}
+    texts = generate.Generator._replies(obj, "")
+    assert texts == [A, B]
+    assert generate._scores_by_text(obj, texts) == {A: 0.2, B: 0.3}
+
+    # 空的是最后一条
+    obj = {"replies": [A, B, ""], "reply_scores": [0.1, 0.2, 0.3]}
+    texts = generate.Generator._replies(obj, "")
+    assert texts == [A, B]
+    assert generate._scores_by_text(obj, texts) == {A: 0.1, B: 0.2}
+
+    # {候选原文: 分} 这种写法压根不看 obj["replies"] 的顺序，空候选混在里面不影响它，原样不动
+    obj = {"replies": [A, "", B], "reply_scores": {A: 0.1, B: 0.3}}
+    texts = generate.Generator._replies(obj, "")
+    assert generate._scores_by_text(obj, texts) == {A: 0.1, B: 0.3}
+
+    # {"1": 分, "2": 分} 这种一基下标是按 texts（已经丢空）的位置编号的，跟空候选也没关系
+    obj = {"replies": [A, "", B], "reply_scores": {"1": 0.5, "2": 0.6}}
+    texts = generate.Generator._replies(obj, "")
+    assert generate._scores_by_text(obj, texts) == {A: 0.5, B: 0.6}
+
+    # 模型压根没给 replies 数组（比如截断只剩 reply_scores，或者退回逐行读）：
+    # 没有模型原序可依，位置对齐是唯一能做的事，这条路径本来就该保持原样。
+    obj = {"reply_scores": [0.7, 0.8]}
+    assert "replies" not in obj
+    assert generate._scores_by_text(obj, [A, B]) == {A: 0.7, B: 0.8}
+
     print("\n三个话术都在（并发三次调用，判断取第一份）:")
     a = json.dumps({"replies": ["甲一", "甲二"], "reply_scores": [0.6, 0.4],
                     "judgment": {**JUDGMENT, "intent": "第一份判断"}}, ensure_ascii=False)

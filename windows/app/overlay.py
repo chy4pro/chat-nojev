@@ -611,7 +611,7 @@ class Overlay:
         for group in (self.draft,):
             provider = self._provider_of(group)
             name = group.table[provider].name
-            configured = bool(group.stored_key())
+            configured = bool(group.stored_key(provider))  # 问的是「调这家有没有 key」
             group.keyState.setText("已配置" if configured else "未配置")
             group.keyEdit.setPlaceholderText(
                 "已配置，留空保留" if configured else f"输入 {name} API 密钥")
@@ -627,7 +627,7 @@ class Overlay:
         provider = self._provider_of(group)
         custom = group.kind == "draft" and provider in providers.CUSTOM
         base = self.baseEdit.text().strip() if custom else None
-        key = group.keyEdit.text().strip() or group.stored_key()
+        key = group.keyEdit.text().strip() or group.stored_key(provider)
         if not key:
             group.status.setText("先填密钥")
             return
@@ -706,7 +706,7 @@ class Overlay:
             return
         for group, provider in ((self.draft, draft_provider),):
             name = group.table[provider].name
-            if not group.keyEdit.text().strip() and not group.stored_key():
+            if not group.keyEdit.text().strip() and not group.stored_key(provider):
                 self._settings_feedback(f"请先填写 {group.keyTitle} 的 API 密钥。", error=True)
                 group.keyEdit.setFocus()
                 return

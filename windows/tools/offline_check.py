@@ -29,7 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core import draft
 from core.engine import analyze
-from core.providers import LLM_ENV
+from core.errors import redact_secrets
+from core.providers import LEGACY, LLM_ENV
 from core.questions import CHOICE_LABELS, JUDGE_QUESTIONS, SCORE_MAX
 
 MESSAGES = [
@@ -178,7 +179,21 @@ def main() -> int:
     os.environ[LLM_ENV] = "offline-not-a-key"
     print("offline_check —— 合并调用的解析器，全程不联网\n")
 
-    print("正常形状:")
+    print("脱敏（REDACT_ENV 比 LEGACY 宽，OPENROUTER_API_KEY 只在前者里）:")
+    os.environ[LLM_ENV] = "llm-secret-456"
+    os.environ["OPENROUTER_API_KEY"] = "or-secret-123"
+    text = "debug: LLM_API_KEY=llm-secret-456 OPENROUTER_API_KEY=or-secret-123 done"
+    redacted = redact_secrets(text)
+    assert "or-secret-123" not in redacted and "llm-secret-456" not in redacted, redacted
+    del os.environ["OPENROUTER_API_KEY"]
+    os.environ[LLM_ENV] = "offline-not-a-key"     # 恢复成下面用例要的占位值
+    # LEGACY 依然不该收 OPENROUTER_API_KEY：那是从 jev-chat-windows 升上来的机器上可能还留着
+    # 的判断接口 key，回退到它去调别家的起草接口只会更糟，比没有 key 还差。REDACT_ENV 可以比
+    # LEGACY 宽（日志里万一带出来还是要遮），但两张表不能合并——这条断言防的就是以后有人
+    # "整理" 代码时把它们并回一张。
+    assert "OPENROUTER_API_KEY" not in LEGACY.values()
+
+    print("\n正常形状:")
     r = run("完整对象", [reply()])
     assert r["candidates"] == REPLIES and r["best_index"] == 1
     assert r["scores"] == [0.2, 0.65, 0.15] and r["usage"] == {}

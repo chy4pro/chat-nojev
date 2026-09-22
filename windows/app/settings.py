@@ -3,6 +3,8 @@
 
 key 的持久化走 Windows 用户环境变量（注册表 HKCU\\Environment，跟 setx 写的是同一个地方）。
 全程只有一把：LLM_API_KEY，跟选哪家来源无关（上游还有一把判断模型的 key，判断合进同一次调用后没有了）。
+它空着时退回**当前选中那家**自己的惯用变量（core/providers.py 表里的 env），只认选中的那一家——
+别家的 key 拿来调这家的接口，比「没配 key」糟得多。
 读的时候先看进程环境，没有就直接读注册表——IDE 启动时把环境快照拿走了，之后再 Run 继承的还是旧环境，
 只靠 os.environ 会「保存了下次打开还是没有」。"""
 from __future__ import annotations
@@ -12,7 +14,7 @@ import json
 import os
 import sys  # 只为下面这一处：打包后 __file__ 指向临时解包目录，config.json 得放在 exe 旁边才存得住
 
-from core.providers import CUSTOM, DRAFT_PROVIDERS, LEGACY, LLM_ENV
+from core.providers import CUSTOM, DRAFT_PROVIDERS, LLM_ENV
 
 _ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
          else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -89,9 +91,13 @@ def _read_env(env_name: str) -> str:
             os.environ[env_name] = v
     return v
 
-def _get_key(env_name: str) -> str:
-    """那把 key。新名字空着就退回老版本按来源存的变量（下次保存会抄进新名字）。"""
-    return _read_env(env_name) or _read_env(LEGACY[env_name])
+def _get_key(env_name: str, provider: str = "") -> str:
+    """那把 key。空着就退回 provider 这家自己的惯用变量（DEEPSEEK_API_KEY 之类）。
+
+    只认传进来的这一家：界面上问「配没配好」，问的就是「调**这家**有没有 key 可用」。
+    provider 不传 = 只看 LLM_API_KEY。"""
+    spec = DRAFT_PROVIDERS.get(provider)
+    return _read_env(env_name) or (_read_env(spec.env) if spec and spec.env else "")
 
 def _set_key(env_name: str, value: str) -> None:
     """只写进程环境 + HKCU\\Environment，不写任何文件。"""
@@ -106,9 +112,10 @@ def _set_key(env_name: str, value: str) -> None:
     except Exception:
         pass  # 非 Windows（本机 Mac 开发）走不到，忽略
 
-def llm_key() -> str:
-    """唯一那把 key，所有语言模型来源共用。"""
-    return _get_key(LLM_ENV)
+def llm_key(provider: str = "") -> str:
+    """唯一那把 key，所有语言模型来源共用；没有时退回选中那家的惯用变量。
+    provider 不传就按保存的来源算（设置页里刚改还没保存的，得把当前选中的那家传进来）。"""
+    return _get_key(LLM_ENV, provider or draft_provider())
 
 def has_llm_key() -> bool:
     return bool(llm_key())
@@ -123,8 +130,10 @@ def save(relationship_text: str, context_n: int | None = None, *,
          check_update_on: bool | None = None) -> None:
     """每个参数为空/None = 保留当前值。key 写进程环境 + HKCU\\Environment，不写任何文件。"""
     draft = draft_provider_text if draft_provider_text in DRAFT_PROVIDERS else draft_provider()
-    # 没重填就把老变量里的值抄进新名字，迁移一次性做完（_get_key 已经退回读过老的了）
-    value = llm_key_text or ("" if _read_env(LLM_ENV) else _get_key(LLM_ENV))
+    # 只写用户自己填的那把。惯用变量（DEEPSEEK_API_KEY 之类）留在原处按来源读就行，
+    # 绝不抄进 LLM_API_KEY——一抄就成了所有来源共用的全局 key，正是要修的那个毛病：
+    # 一把 DeepSeek 的 key 会跟着用户换来源，被发到 OpenRouter 去。
+    value = (llm_key_text or "").strip()
     if value:
         _set_key(LLM_ENV, value)
     n = context() if context_n is None else max(3, min(30, int(context_n)))

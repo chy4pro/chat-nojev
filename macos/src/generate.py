@@ -283,6 +283,17 @@ def _scores_by_text(obj: dict, texts: list[str]) -> dict:
     """
     raw = obj.get("reply_scores")
     if isinstance(raw, (list, tuple)):
+        # 数组是按模型自己写的 replies 顺序排的，而 texts 是清洗后**丢掉空条目**的结果。
+        # 直接跟 texts 对齐的话，空条目后面每一条都会拿到前一条的分。所以先按模型原样的
+        # 顺序配对，再挑出还留着的那几条。模型没给 replies 数组（截断、或退回逐行读）时
+        # 没有原序可依，只能按现有顺序对齐。
+        original = obj.get("replies")
+        if isinstance(original, (list, tuple)):
+            paired: dict = {}
+            for text, value in zip((_clean_reply(str(o)) for o in original), raw):
+                if text and text not in paired:
+                    paired[text] = value
+            return {t: paired[t] for t in texts if t in paired}
         return {t: v for t, v in zip(texts, raw)}
     if not isinstance(raw, dict):
         return {}
