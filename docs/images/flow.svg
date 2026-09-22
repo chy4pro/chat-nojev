@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 470" width="900" height="470" role="img" aria-label="原版的两到三次调用与本项目的一次调用，送到面板的是同一批字段">
+  <defs>
+    <marker id="a-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#94A3B8"/>
+    </marker>
+    <marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#2563EB"/>
+    </marker>
+    <style>
+      text { font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .h { font-size: 14px; fill: #0F172A; font-weight: 600; }
+      .t { font-size: 14px; fill: #0F172A; }
+      .s { font-size: 12.5px; fill: #64748B; }
+      .cap { font-size: 13px; fill: #64748B; }
+      .box { fill: #FFFFFF; stroke: #CBD5E1; stroke-width: 1.5; }
+      .grp { fill: none; stroke: #CBD5E1; stroke-width: 1.5; stroke-dasharray: 6 5; }
+      .grpb { fill: none; stroke: #2563EB; stroke-width: 1.5; stroke-dasharray: 6 5; }
+      .wire { fill: none; stroke: #94A3B8; stroke-width: 2; }
+      .wireb { fill: none; stroke: #2563EB; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <rect x="8" y="8" width="884" height="454" rx="14" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5"/>
+
+  <!-- 来源 -->
+  <rect class="box" x="24" y="200" width="126" height="70" rx="9"/>
+  <text class="t" x="87" y="229" text-anchor="middle">屏幕上的</text>
+  <text class="t" x="87" y="250" text-anchor="middle">一段对话</text>
+
+  <path class="wire" d="M150 235 H168"/>
+  <path class="wire" d="M168 235 V143 H178" marker-end="url(#a-grey)"/>
+  <path class="wireb" d="M168 235 V360 H178" marker-end="url(#a-blue)"/>
+
+  <!-- 原版 -->
+  <rect class="grp" x="186" y="28" width="300" height="230" rx="12"/>
+  <text class="h" x="336" y="52" text-anchor="middle">原版：两次调用，macOS 三次</text>
+
+  <rect class="box" x="204" y="66" width="264" height="52" rx="8"/>
+  <text class="t" x="220" y="88">起草调用</text>
+  <text class="s" x="220" y="107">生成模型写 3 条候选回复</text>
+
+  <rect class="box" x="204" y="128" width="264" height="52" rx="8"/>
+  <text class="t" x="220" y="150">判断调用</text>
+  <text class="s" x="220" y="169">Jev 判断模型出意图、风险、动作</text>
+
+  <rect class="box" x="204" y="190" width="264" height="52" rx="8" stroke-dasharray="5 4"/>
+  <text class="t" x="220" y="212">排序调用<tspan class="s">（仅 macOS）</tspan></text>
+  <text class="s" x="220" y="231">判断模型给候选打分、排序</text>
+
+  <!-- 本项目 -->
+  <rect class="grpb" x="186" y="300" width="300" height="120" rx="12"/>
+  <text class="h" x="336" y="324" text-anchor="middle">本项目：一次调用</text>
+
+  <rect x="204" y="338" width="264" height="62" rx="8" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.5"/>
+  <text class="t" x="220" y="363">一次调用</text>
+  <text class="s" x="220" y="383">同一个模型：候选 + 判断 + 打分</text>
+
+  <!-- 汇到面板 -->
+  <path class="wire" d="M486 143 C524 143 516 185 552 185" marker-end="url(#a-grey)"/>
+  <path class="wireb" d="M486 360 C524 360 516 300 552 300" marker-end="url(#a-blue)"/>
+
+  <!-- 面板字段 -->
+  <rect class="box" x="562" y="110" width="314" height="250" rx="10"/>
+  <text class="h" x="586" y="141">悬浮窗面板读到的值</text>
+  <path d="M586 154 H852" stroke="#E2E8F0" stroke-width="1.5"/>
+  <text class="t" x="586" y="182">对方真实意图</text>
+  <text class="t" x="586" y="210">紧张度 / 风险 0–9</text>
+  <text class="t" x="586" y="238">该不该马上回、行动建议</text>
+  <text class="t" x="586" y="266">3 条候选回复</text>
+  <text class="t" x="586" y="294">每条候选的分数与把握度</text>
+  <text class="s" x="586" y="331">字段、类型、渲染代码都没动</text>
+
+  <text class="cap" x="450" y="445" text-anchor="middle">同样的一批值，少走一到两次调用；差分测试比对的就是它们。</text>
+</svg>

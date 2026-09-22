@@ -6,7 +6,7 @@
 # JSON files. Nothing here touches the network, Gradle or the Android SDK — the
 # files under test are pure Kotlin plus org.json, and the three Android classes
 # they do touch (Rect, Log, Context/SharedPreferences) come from the hand-written
-# stubs under $PROBE/kotlinc-src/android.
+# stubs that ship with the repository under tools/equivalence_stub/android.
 #
 # Usage:
 #   tools/equivalence_check_android.sh --upstream <path to jev-chat-jarvis>
@@ -50,7 +50,9 @@ JDK="$(echo "$PROBE"/jdk/jdk-*)"
 KOTLINC="$PROBE/kotlinc/kotlinc/bin/kotlinc"
 JSONJAR="$PROBE/org.json.jar"
 STDLIB="$PROBE/kotlinc/kotlinc/lib/kotlin-stdlib.jar"
-ANDROID_STUBS="$PROBE/kotlinc-src/android"
+# 三个 Android 类型的桩(Rect / Log / Context)是**源码**,跟仓库走,不跟工具链走:
+# 本地和 CI 用同一份,改一处两边都变。--probe 只提供 JDK、kotlinc 和 org.json。
+ANDROID_STUBS="$HERE/equivalence_stub/android"
 export JAVA_HOME="$JDK"
 export PATH="$JAVA_HOME/bin:$PATH"
 

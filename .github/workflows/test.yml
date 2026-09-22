@@ -1,0 +1,155 @@
+name: test
+
+# 门槛：push / PR 都跑，三个 release workflow 也用 workflow_call 把它当作前置。
+# 一个 Linux runner 就够——五套用例全是纯 Python 和纯 JVM，没有一套碰 Android SDK、
+# PySide6 或 PyObjC。出网的只有准备步骤（clone 上游、下 kotlinc/org.json），
+# 用例本身一次都不发请求，也不需要任何 secret。
+on:
+  push:
+    branches: ['**']        # tag 不触发：tag 走对应的 release workflow，它自己会调这个
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # 上游三棵树：差分用例拿它们当对照组
+  UPSTREAM_WINDOWS: jev-chat/jev-chat-windows
+  UPSTREAM_MACOS: jev-chat/jev-chat-jarvis-mac
+  UPSTREAM_ANDROID: jev-chat/jev-chat-jarvis
+  # Android 那套要一个独立的 kotlinc（不走 Gradle，也不要 Android SDK）
+  KOTLIN_VERSION: '1.9.24'
+  ORG_JSON_VERSION: '20240303'
+
+jobs:
+  suites:
+    name: all suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'   # macos/pyproject.toml 要求 >=3.12
+
+      # 唯一的第三方依赖：上游 macOS 的 src/judge.py 顶上 `import numpy`，
+      # equivalence_check_macos.py 的上游那一侧要 import 它。其余四套纯标准库。
+      - name: numpy（只为上游 macOS 那一侧）
+        run: python -m pip install --disable-pip-version-check --quiet numpy
+
+      - name: 拉上游三棵树（浅克隆，放在工作区外）
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/upstream"
+          for repo in "$UPSTREAM_WINDOWS" "$UPSTREAM_MACOS" "$UPSTREAM_ANDROID"; do
+            name="${repo##*/}"
+            git clone --depth 1 --quiet "https://github.com/$repo.git" "$RUNNER_TEMP/upstream/$name"
+            echo "$name -> $(git -C "$RUNNER_TEMP/upstream/$name" rev-parse --short HEAD)"
+          done
+
+      # ---------------------------------------------------------------- 自测
+      # 两个 offline_check.py 都不吃参数，也都用 __file__ 定位自己那棵树，
+      # 所以从仓库根跑就行。
+
+      - name: windows/tools/offline_check.py
+        run: python windows/tools/offline_check.py
+
+      - name: macos/tools/offline_check.py
+        run: python macos/tools/offline_check.py
+
+      # ---------------------------------------------------------------- 差分
+      # --ours 三套都默认指向本仓库对应的子目录，只需要给 --upstream。
+
+      - name: tools/equivalence_check.py（windows ↔ 上游）
+        run: python tools/equivalence_check.py --upstream "$RUNNER_TEMP/upstream/jev-chat-windows"
+
+      - name: tools/equivalence_check_macos.py（macos ↔ 上游）
+        run: python tools/equivalence_check_macos.py --upstream "$RUNNER_TEMP/upstream/jev-chat-jarvis-mac"
+
+      # ------------------------------------------------- Android 差分的工具链
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'       # 跟 android/app/build.gradle.kts 的 jvmTarget 一致
+
+      - name: 缓存 kotlinc / org.json
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/probe-dl
+          key: probe-kotlin-${{ env.KOTLIN_VERSION }}-json-${{ env.ORG_JSON_VERSION }}
+
+      - name: 搭 --probe 目录
+        run: |
+          set -euo pipefail
+          DL="$RUNNER_TEMP/probe-dl"
+          PROBE="$RUNNER_TEMP/android-probe"
+          mkdir -p "$DL"
+          rm -rf "$PROBE"
+          mkdir -p "$PROBE"
+
+          [ -f "$DL/kotlin-compiler.zip" ] || curl -fsSL --retry 3 -o "$DL/kotlin-compiler.zip" \
+            "https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip"
+          [ -f "$DL/org.json.jar" ] || curl -fsSL --retry 3 -o "$DL/org.json.jar" \
+            "https://repo1.maven.org/maven2/org/json/json/${ORG_JSON_VERSION}/json-${ORG_JSON_VERSION}.jar"
+
+          # 脚本里的四条路径，照着摆：
+          #   $PROBE/jdk/jdk-*                    （glob，取 JAVA_HOME）
+          #   $PROBE/kotlinc/kotlinc/bin/kotlinc  （zip 解出来就叫 kotlinc/，所以再套一层）
+          #   $PROBE/kotlinc/kotlinc/lib/kotlin-stdlib.jar
+          #   $PROBE/org.json.jar
+          mkdir -p "$PROBE/jdk"
+          ln -sfn "$JAVA_HOME" "$PROBE/jdk/jdk-17"
+          mkdir -p "$PROBE/kotlinc"
+          unzip -q "$DL/kotlin-compiler.zip" -d "$PROBE/kotlinc"
+          chmod +x "$PROBE/kotlinc/kotlinc/bin/kotlinc"
+          cp "$DL/org.json.jar" "$PROBE/org.json.jar"
+
+          # 安卓那三个类的替身(Rect / Log / Context)是仓库里的源码,不在这里写:
+          # tools/equivalence_stub/android/ 跟着仓库走,本地和 CI 用同一份,改一处两边都变。
+          # --probe 只负责提供 JDK、kotlinc 和 org.json 这三样工具链。
+
+          # 摆错一处就整套跑不起来，这里当场点名
+          for p in "jdk/jdk-17/bin/java" \
+                   "kotlinc/kotlinc/bin/kotlinc" \
+                   "kotlinc/kotlinc/lib/kotlin-stdlib.jar" \
+                   "org.json.jar" \; do
+            [ -e "$PROBE/$p" ] || { echo "::error::probe 少了 $p"; exit 1; }
+          done
+          echo "probe ok: $PROBE"
+
+      - name: tools/equivalence_check_android.sh（android ↔ 上游）
+        run: |
+          tools/equivalence_check_android.sh \
+            --upstream "$RUNNER_TEMP/upstream/jev-chat-jarvis" \
+            --probe "$RUNNER_TEMP/android-probe"
+
+      # ------------------------------------------------------------ 负控
+      # 只有 Android 这套带负控开关（--negative-control keys|clamp）；
+      # 两个 offline_check.py 和两个 Python 差分脚本都没有对应的参数，所以这里没有
+      # 它们的负控可跑。负控不红 = 用例已经测不出东西了，跟用例变红一样算回归。
+
+      - name: 负控 keys 必须变红
+        run: |
+          if tools/equivalence_check_android.sh \
+               --upstream "$RUNNER_TEMP/upstream/jev-chat-jarvis" \
+               --probe "$RUNNER_TEMP/android-probe" \
+               --negative-control keys; then
+            echo "::error::负控 keys 居然通过了——这套差分已经认不出错排名了"
+            exit 1
+          fi
+          echo "负控 keys 如期变红"
+
+      - name: 负控 clamp 必须变红
+        run: |
+          if tools/equivalence_check_android.sh \
+               --upstream "$RUNNER_TEMP/upstream/jev-chat-jarvis" \
+               --probe "$RUNNER_TEMP/android-probe" \
+               --negative-control clamp; then
+            echo "::error::负控 clamp 居然通过了——这套差分已经认不出适配层多做事了"
+            exit 1
+          fi
+          echo "负控 clamp 如期变红"

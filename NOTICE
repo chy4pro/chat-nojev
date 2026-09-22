@@ -88,8 +88,7 @@ warranty disclaimer are in `windows/LICENSE` (copied verbatim from
 jev-chat-windows, carrying the first two copyright lines above), in
 `android/LICENSE` (copied verbatim from jev-chat-jarvis, carrying the first)
 and in `macos/LICENSE` (copied verbatim from jev-chat-jarvis-mac, carrying the
-third). (This repository has no LICENSE file of its own yet, although
-README.md points at one.)
+third).
 
 Terms inherited from upstream
 -----------------------------

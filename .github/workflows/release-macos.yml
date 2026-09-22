@@ -1,0 +1,94 @@
+name: release-macos
+
+# 不自己造打包流程：直接跑上游那两个脚本（packaging/release.sh 内部会调
+# packaging/build_app.sh）。它们已经做了 ditto 压包、解包回验、SHA256。
+# 不签名、不公证：release.sh 的 --sign 是可选的，这里不给，
+# 只在 Release 说明里写清楚用户第一次打开要怎么办、维护者要配什么才能去掉这一步。
+on:
+  push:
+    tags: ['macos-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  build:
+    needs: test
+    runs-on: macos-latest    # .app 里的原生启动器要 clang；ditto/plutil/iconutil 也只有 macOS 有
+    defaults:
+      run:
+        working-directory: macos
+    steps:
+      - uses: actions/checkout@v4
+
+      # build_app.sh 需要 uv：缺了它 .venv 建不起来，make_icon.py（要 PyObjC）跑不了，
+      # 图标生成会被静默跳过，然后 release.sh 的「图标在」那一条硬检查失败。
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: macos/pyproject.toml
+
+      - name: tag 和 pyproject.toml 的 version 必须一致
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          ver="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' pyproject.toml | head -1)"
+          tag_ver="${GITHUB_REF_NAME#macos-v}"
+          if [ "$ver" != "$tag_ver" ]; then
+            echo "::error::tag 是 $GITHUB_REF_NAME，但 pyproject.toml 里 version = $ver。"
+            echo "::error::包名和 .app 里的 CFBundleVersion 都取自 pyproject.toml，先把它改成 $tag_ver 再打 tag。"
+            exit 1
+          fi
+          echo "version = $ver"
+
+      # 显式先建一次环境：交给 build_app.sh 自己建也行，但它失败是静默的
+      # （只打印「跳过图标」），错误最后落在一条看不懂的检查上。这里先炸，信息清楚。
+      # 注意 uv.lock 还是上游那一份，这里是重新解析（不是 --frozen），会把锁文件更新一遍。
+      - name: 准备 .venv（make_icon.py 要 PyObjC）
+        run: uv sync
+
+      - name: 打包（build_app.sh + ditto + 校验）
+        run: ./packaging/release.sh
+
+      - name: 列出产物
+        id: pack
+        run: |
+          set -euo pipefail
+          ls -la dist
+          echo "ver=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' pyproject.toml | head -1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jev-jarvis-macos
+          path: |
+            macos/dist/*.zip
+            macos/dist/SHA256SUMS
+          if-no-files-found: warn
+
+      - name: 发 Release
+        if: startsWith(github.ref, 'refs/tags/macos-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            macos/dist/*.zip
+            macos/dist/SHA256SUMS
+          generate_release_notes: true
+          body: |
+            需要 **macOS 13+**。解压后把 `jev-jarvis.app` 拖进「应用程序」。
+
+            **这个包没有签名，也没有公证。** 第一次打开：右键（或按住 Control 点）→ 打开 → 再点「打开」，只需这一次。
+            若提示「已损坏，无法打开」（浏览器下载常见）：
+            `sudo xattr -r -d com.apple.quarantine /Applications/jev-jarvis.app`
+
+            **第一次启动**会联网用 uv 装依赖（几分钟）。只需给 `jev-jarvis` 授予「屏幕录制」权限。
+
+            构建于 `macos-latest`（Apple Silicon），`.app` 里的原生启动器是 arm64。
+
+            <sub>要去掉上面那段 Gatekeeper 提示，维护者需要：把 Developer ID Application 证书导入 runner 的钥匙串，
+            给 `packaging/release.sh` 传 `--sign "Developer ID Application: … (TEAMID)"`，再用 `xcrun notarytool` 公证、`xcrun stapler` 订装。
+            这条流水线刻意没有做这些，也没有引用任何证书相关的 secret。</sub>

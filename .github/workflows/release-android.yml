@@ -1,0 +1,158 @@
+name: release-android
+
+# GitHub 托管的 Linux runner 自带 Android SDK，所以 APK 在 CI 里打得出来
+# （开发容器里打不出来，那是容器没 SDK，不是工程的问题）。
+#
+# 签名：android/app/build.gradle.kts 里从 JEV_KEYSTORE_PROPS 指的 properties 文件读签名配置，
+# 默认值是一个写死的 Windows 路径（H:/…），在 Linux 上 file() 会把它当相对路径、必然不存在，
+# 于是 signingConfigs 为空、release 构建出来是未签名的 APK。这里不改那个 Gradle 文件，
+# 就用它本来就留着的 JEV_KEYSTORE_PROPS 这个口子：
+#   * 配了 ANDROID_KEYSTORE_BASE64 等 secret  -> 现写一份 properties，签名
+#   * 没配                                    -> 照旧出未签名包，文件名带 -unsigned，Release 说明里写明
+on:
+  push:
+    tags: ['android-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'      # AGP 8.7.3 / kotlinOptions.jvmTarget = 17
+          cache: gradle
+          cache-dependency-path: |
+            android/gradle/wrapper/gradle-wrapper.properties
+            android/**/*.gradle.kts
+
+      - uses: android-actions/setup-android@v3
+
+      - name: versionName 对一下 tag（只提醒，不拦）
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          name="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)"
+          tag_ver="${GITHUB_REF_NAME#android-v}"
+          if [ "$name" != "$tag_ver" ]; then
+            echo "::warning::tag 是 $GITHUB_REF_NAME，但 app/build.gradle.kts 里 versionName = $name（APK 里写的是后者）"
+          fi
+
+      # 仓库里 gradlew 的模式是 100644，没有可执行位（上游就是这样提交的）
+      - name: 给 gradlew 加可执行位
+        run: chmod +x gradlew
+
+      - name: 决定签不签名
+        id: signing
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::没有配 ANDROID_KEYSTORE_BASE64，这次出未签名包"
+            exit 0
+          fi
+          for v in STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::配了 keystore 却缺 ANDROID_${v}，不能半配着签"
+              exit 1
+            fi
+          done
+          ks="$RUNNER_TEMP/release.keystore"
+          props="$RUNNER_TEMP/keystore.properties"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$ks"
+          umask 077
+          {
+            printf 'storeFile=%s\n' "$ks"
+            printf 'storePassword=%s\n' "$STORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$KEY_PASSWORD"
+          } > "$props"
+          # build.gradle.kts 就是读这个环境变量的，Gradle 文件一个字没改
+          echo "JEV_KEYSTORE_PROPS=$props" >> "$GITHUB_ENV"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::用 secret 里的 keystore 签名"
+
+      - name: assembleRelease
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: 给 APK 起名
+        id: pack
+        run: |
+          set -euo pipefail
+          out=app/build/outputs/apk/release
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            src="$out/app-release.apk"; suffix=""
+          else
+            src="$out/app-release-unsigned.apk"; suffix="-unsigned"
+          fi
+          [ -f "$src" ] || { echo "::error::没生成 $src"; ls -la "$out" || true; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then ver="v${GITHUB_REF_NAME#android-v}"; else ver="${GITHUB_SHA:0:7}"; fi
+          apk="jev-chat-android-${ver}${suffix}.apk"
+          mv "$src" "$out/$apk"
+          ( cd "$out" && sha256sum "$apk" > "$apk.sha256" )
+          echo "apk=android/$out/$apk" >> "$GITHUB_OUTPUT"
+          echo "sha=android/$out/$apk.sha256" >> "$GITHUB_OUTPUT"
+          ls -la "$out"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jev-chat-android
+          path: |
+            android/app/build/outputs/apk/release/*.apk
+            android/app/build/outputs/apk/release/*.sha256
+          if-no-files-found: warn
+
+      - name: 发 Release（已签名）
+        if: startsWith(github.ref, 'refs/tags/android-v') && steps.signing.outputs.signed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.pack.outputs.apk }}
+            ${{ steps.pack.outputs.sha }}
+          generate_release_notes: true
+          body: |
+            Android 11+（minSdk 30），只打 `arm64-v8a`。
+
+            APK 用仓库 secret 里的 release keystore 签过名，可以直接安装/升级。
+
+      - name: 发 Release（未签名）
+        if: startsWith(github.ref, 'refs/tags/android-v') && steps.signing.outputs.signed != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.pack.outputs.apk }}
+            ${{ steps.pack.outputs.sha }}
+          generate_release_notes: true
+          body: |
+            Android 11+（minSdk 30），只打 `arm64-v8a`。
+
+            ⚠️ **这个 APK 没有签名**（文件名里的 `-unsigned` 就是这个意思）。
+            未签名的 APK 装不上，也不能作为升级包覆盖已装的版本。要自己装，先本地签：
+
+            ```
+            apksigner sign --ks <你的.jks> --out signed.apk jev-chat-android-*-unsigned.apk
+            ```
+
+            <sub>要让这条流水线直接出签名包，维护者需要在仓库里配四个 secret：
+            `ANDROID_KEYSTORE_BASE64`（`base64 -w0 release.jks`）、`ANDROID_KEYSTORE_PASSWORD`、
+            `ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。配齐之后同一条流水线会走签名分支，
+            文件名也不再带 `-unsigned`。测试流水线不需要任何 secret。</sub>

@@ -256,7 +256,7 @@ pyinstaller --noconfirm --clean jev.spec
 ```
 
 出来的是 `dist\jev-chat-windows\`，整个文件夹就是成品（onedir：onefile 有 150MB 要每次启动解压）。
-推一个 `v*` tag，`.github/workflows/release.yml` 会在 `windows-latest` 上打好、压成 zip 挂到 Release 上；
+推一个 `windows-v*` tag，仓库根目录的 `.github/workflows/release-windows.yml` 会在 `windows-latest` 上打好、压成 zip 挂到 Release 上；
 手动触发（workflow_dispatch）只出 artifact，方便试打包。
 
 ## 设置说明
@@ -337,7 +337,7 @@ probe/                  一次性探针，结论已写进本文，留着是为�
   probe_laya_en.py      把对话人工译成英文再喂 typed-decisions → 好一点，但生气那段仍判成闲聊
 jev.spec                PyInstaller 打包定义（onedir），build.bat 和 CI 共用这一份
 build.bat               本地一键打包（双击就行）
-.github/workflows/release.yml  推 v* tag → windows-latest 上打包 → zip 挂到 Release
+（仓库根）.github/workflows/release-windows.yml  推 windows-v* tag → windows-latest 上打包 → zip 挂到 Release
 requirements.txt        依赖（纯 ASCII 注释：中文 Windows 上 pip 按 GBK 读会炸）
 NOTICE                  出处、第三方组件许可证与商用约束
 docs/KICKOFF.md         最初的需求和硬约束说明
