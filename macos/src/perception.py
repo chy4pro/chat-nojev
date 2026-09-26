@@ -1,7 +1,7 @@
-"""Perception layer: find WeChat's window, capture it, OCR it, extract the conversation.
+"""Perception layer: find the chat app's window, capture it, OCR it, extract the conversation.
 
-Validated facts this module is built on (probed 2026-09-21 on WeChat 4.1 Mac):
-  * `screencapture -l <windowid>` returns real content even when WeChat is not frontmost,
+Validated facts this module is built on (probed 2026-09-21 on the target app, 4.x Mac):
+  * `screencapture -l <windowid>` returns real content even when the app is not frontmost,
     so our HUD floating above it never pollutes the capture.
   * Vision OCR reads Simplified Chinese chat text at conf 1.00 on message bodies;
     errors are rare and confined to unusual glyphs.
@@ -35,6 +35,11 @@ MIN_CONF = 0.30
 USERNAME_H_MAX = 0.026   # sender-name lines render smaller than bubble text
 MESSAGE_H_MIN = 0.028
 MIN_TEXT_LEN = 1
+
+# `CGWindowListCreateImage` can wait forever inside macOS ScreenCaptureKit. Use
+# a separate process for the production path so the timeout can actually kill
+# the blocked native call instead of leaving a stuck thread in the HUD process.
+SUBPROCESS_CAPTURE_TIMEOUT_S = 3.0
 
 
 @dataclass
@@ -84,6 +89,17 @@ class WindowInfo:
 
 # --------------------------------------------------------------------------- window
 
+# The names WeChat reports for itself and for its main chat window on macOS. Mainland
+# builds report 微信; some locales and 4.x builds report WeChat or Weixin. One list,
+# matched EXACTLY, because both directions of the substring test that used to live at
+# the call sites were wrong: `"WeChat" in owner or "微信" in owner` missed the Weixin
+# alias entirely (a 4.x build reporting that name found no window at all, and the panel
+# simply disappeared), while accepting any owner that merely *contains* 微信 — 微信读书,
+# 微信输入法 and 企业微信 own titled windows that clear the 600x400 gate below, so their
+# pixels could be captured and OCR'd as chat text (#50). A new alias is now one edit
+# here instead of one edit per call site.
+WECHAT_APP_NAMES = ("微信", "WeChat", "Weixin")
+
 
 def screen_capture_ok() -> bool:
     """False when macOS has not granted Screen Recording to this app.
@@ -107,12 +123,12 @@ def request_screen_capture() -> bool:
 
 
 def frontmost_app_is_wechat() -> bool | None:
-    """Whether the app currently receiving user input is WeChat.
+    """Whether the app currently receiving user input is the chat app.
 
-    The window-ID capture path can read an obscured WeChat window, which is useful for
+    The window-ID capture path can read an obscured chat window, which is useful for
     OCR but not a safe display boundary: a global floating HUD left above Chrome looks
     as if browser text were analysed. Keep foreground ownership separate from window
-    discovery so returning to WeChat can force a fresh capture instead of reusing cache.
+    discovery so returning to the chat app can force a fresh capture instead of reusing cache.
     """
     try:
         import AppKit
@@ -121,23 +137,75 @@ def frontmost_app_is_wechat() -> bool | None:
             return None
         bundle = app.bundleIdentifier() or ""
         name = app.localizedName() or ""
-        return bundle == "com.tencent.xinWeChat" or name in ("微信", "WeChat", "Weixin")
+        return bundle == "com.tencent.xinWeChat" or name in WECHAT_APP_NAMES
+    except Exception:
+        return None
+
+
+def _ax_focused_frame(pid: int) -> tuple[float, float, float, float] | None:
+    """(x, y, w, h) of the app's AX-focused window, or None when it cannot be read.
+
+    The focused window is the conversation the user is actually reading — the one
+    thing neither the main-window priority nor the area sort can see once chats are
+    torn off into detached windows (#91). Same shape as ``fill._ax_rect``: AX and CG
+    agree on top-left point coordinates, so the frames compare directly. AX reads
+    fail routinely (permission, timing, odd surfaces), so every failure degrades to
+    None and the caller falls back to the window-list heuristic unchanged.
+    """
+    try:
+        import ApplicationServices as A
+
+        root = A.AXUIElementCreateApplication(int(pid))
+        err, focused = A.AXUIElementCopyAttributeValue(
+            root, A.kAXFocusedWindowAttribute, None)
+        if err != 0 or focused is None:
+            return None
+
+        def attr(element, name):
+            err, value = A.AXUIElementCopyAttributeValue(element, name, None)
+            return value if err == 0 else None
+
+        raw_pos = attr(focused, A.kAXPositionAttribute)
+        raw_size = attr(focused, A.kAXSizeAttribute)
+        if raw_pos is None or raw_size is None:
+            return None
+        ok_pos, point = A.AXValueGetValue(raw_pos, A.kAXValueCGPointType, None)
+        ok_size, size = A.AXValueGetValue(raw_size, A.kAXValueCGSizeType, None)
+        if not (ok_pos and ok_size):
+            return None
+        return (float(point.x), float(point.y), float(size.width), float(size.height))
     except Exception:
         return None
 
 
 def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
-    """Prefer the main chat window over larger detached WeChat windows."""
-    # Current mainland builds report the main window/app as ``Weixin`` on some
-    # macOS locales.  Without that alias a larger detached web/mini-program
-    # window wins the area tiebreak and its old pixels are OCR'd as the chat.
-    main_titles = ("微信", "WeChat", "Weixin")
+    """Read the window the user is chatting in.
+
+    Window ownership is matched exactly against WECHAT_APP_NAMES. It used to be a
+    substring test, which missed the ``Weixin`` alias — a 4.x build reporting that name
+    found no window at all, so the panel just disappeared — and at the same time let
+    any owner containing 微信 through, including sibling apps whose own titled windows
+    clear the size gate below (#50).
+
+    This filters on the owning *app*, not on the window, so WeChat's detached
+    mini-program and web windows still carry owner ``WeChat`` and stay eligible — that
+    is what keeps the main-window-absent fallback working.
+
+    WeChat 4.x users chat in detached windows (the default is 550pt wide, below the
+    old 600pt gate — #91), so the largest window is not necessarily the one on
+    screen. The app's AX-focused window is: when its frame matches an eligible
+    candidate (±2pt), that window wins outright. Only an unreadable or non-chat
+    focus falls through to the #50 heuristic — main-window priority, then area,
+    then the previous-wid stickiness that keeps equally-sized windows from
+    re-picking each tick.
+    """
     opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
     wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
     best: WindowInfo | None = None
+    eligibles: list[WindowInfo] = []
     for w in wins:
         owner = w.get("kCGWindowOwnerName") or ""
-        if "WeChat" not in owner and "微信" not in owner:
+        if owner not in WECHAT_APP_NAMES:
             continue
         title = w.get("kCGWindowName") or ""
         b = dict(w.get("kCGWindowBounds") or {})
@@ -148,21 +216,36 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
             x=float(b.get("X", 0)), y=float(b.get("Y", 0)),
             w=float(b.get("Width", 0)), h=float(b.get("Height", 0)),
         )
-        # main window: has a title, layer 0-ish, big, roughly window-shaped
-        if not title or wi.w < 600 or wi.h < 400:
+        # a chat window: titled and roughly window-shaped. 500pt admits the app's 4.x
+        # default detached chat window; the noise surfaces sampled live (tooltips,
+        # popups) are ≤360pt wide or under 400pt tall.
+        if not title or wi.w < 500 or wi.h < 400:
             continue
-        # only a titled, window-sized window can be the main chat window
-        if best is None or (wi.title in main_titles, wi.w * wi.h, wi.wid) > (
-                best.title in main_titles, best.w * best.h, best.wid):
+        eligibles.append(wi)
+        # only a titled, window-sized window can be the main chat window. The main window
+        # is titled with the app's own display name, so this priority check reads the same
+        # list rather than keeping a second copy that drifts out of step (#50).
+        if best is None or (wi.title in WECHAT_APP_NAMES, wi.w * wi.h, wi.wid) > (
+                best.title in WECHAT_APP_NAMES, best.w * best.h, best.wid):
             best = wi
 
-    # stick with the window we already chose: WeChat 4.x keeps several equally-sized
+    # The user's window beats every heuristic: a focused frame match is exactly the
+    # conversation on screen, and it is fresh each call — no stickiness needed.
+    if eligibles:
+        focused = _ax_focused_frame(eligibles[0].pid)
+        if focused is not None:
+            for wi in eligibles:
+                if all(abs(a - b) <= 2 for a, b in zip(
+                        (wi.x, wi.y, wi.w, wi.h), focused)):
+                    return wi
+
+    # stick with the window we already chose: The app keeps several equally-sized
     # windows around, and re-picking each tick let the target jump between them.
     # Only keep that choice within the same priority; a newly available main wins.
     if previous_wid is not None and best is not None and best.wid != previous_wid:
         for w in wins:
             owner = w.get("kCGWindowOwnerName") or ""
-            if "WeChat" not in owner and "微信" not in owner:
+            if owner not in WECHAT_APP_NAMES:
                 continue
             if int(w.get("kCGWindowNumber") or 0) != previous_wid:
                 continue
@@ -170,24 +253,76 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
             b = dict(w.get("kCGWindowBounds") or {})
             pw = float(b.get("Width", 0))
             ph = float(b.get("Height", 0))
-            if (title and pw >= 600 and ph >= 400
-                    and (title in main_titles) == (best.title in main_titles)):
+            if (title and pw >= 500 and ph >= 400
+                    and (title in WECHAT_APP_NAMES) == (best.title in WECHAT_APP_NAMES)):
                 return WindowInfo(wid=previous_wid, pid=int(w.get("kCGWindowOwnerPID") or 0),
                                   title=title, x=float(b.get("X", 0)), y=float(b.get("Y", 0)),
                                   w=pw, h=ph)
     return best
 
 
-def capture_window(wid: int, out: Path) -> bool:
-    p = subprocess.run(["screencapture", "-x", "-o", "-l", str(wid), str(out)],
-                       capture_output=True, text=True)
+def capture_window(wid: int, out: Path,
+                   timeout_s: float = SUBPROCESS_CAPTURE_TIMEOUT_S) -> bool:
+    try:
+        p = subprocess.run(["screencapture", "-x", "-o", "-l", str(wid), str(out)],
+                           capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return False
+    except OSError:
+        # screencapture cannot even start (missing binary, fork or fd failure): report a
+        # failed capture so callers degrade the same way as any other miss.
+        return False
     return p.returncode == 0 and out.exists() and out.stat().st_size > 1000
+
+
+def _load_png_image(path: Path, max_size: int | None = None):
+    """Load a PNG into pixels that stay alive after the temporary file disappears.
+
+    Reading the file into NSData keeps the image source memory-backed, so deleting the
+    temp dir cannot pull the data away. When ``max_size`` (the window's point-size
+    square) is known and the capture is larger, resample down to it: ``screencapture``
+    writes the window's Retina backing, and Vision's cost tracks pixel count — the
+    measured ~100 ms OCR figure is 1x.
+    """
+    from Foundation import NSData
+
+    data = NSData.dataWithContentsOfFile_(str(path))
+    source = Quartz.CGImageSourceCreateWithData(data, None) if data else None
+    image = Quartz.CGImageSourceCreateImageAtIndex(source, 0, None) if source else None
+    if (image is not None and max_size is not None
+            and max(Quartz.CGImageGetWidth(image), Quartz.CGImageGetHeight(image)) > max_size):
+        from Quartz import ImageIO
+
+        opts = {ImageIO.kCGImageSourceThumbnailMaxPixelSize: max_size,
+                ImageIO.kCGImageSourceCreateThumbnailFromImageAlways: True}
+        thumb = Quartz.CGImageSourceCreateThumbnailAtIndex(source, 0, opts)
+        if thumb is not None:
+            return thumb
+    return image
+
+
+def _window_point_size(wid: int) -> int | None:
+    """The window's point-size bounding square, or None if the window is gone.
+
+    Metadata only — no pixel capture, so it cannot hang — mirroring the enumeration
+    find_wechat_window() already runs each tick. This is the size a ``nominal``-scale
+    capture of that window should match.
+    """
+    opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
+    for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID):
+        if int(w.get("kCGWindowNumber") or 0) != wid:
+            continue
+        b = dict(w.get("kCGWindowBounds") or {})
+        pw, ph = float(b.get("Width", 0)), float(b.get("Height", 0))
+        if pw > 0 and ph > 0:
+            return int(max(pw, ph))
+    return None
 
 
 # ----------------------------------------------------------------------------- ocr
 
 
-def _vision_blocks(handler, languages, chat_only: bool) -> list[TextBlock]:
+def _vision_blocks(handler, languages, chat_only: bool, input_top=None, region=None) -> list[TextBlock]:
     """Run one Vision text request against a handler that is already built.
 
     Shared by the file path and the in-memory path so the request settings — the part that
@@ -219,12 +354,12 @@ def _vision_blocks(handler, languages, chat_only: bool) -> list[TextBlock]:
     req.setRecognitionLanguages_(list(languages))
     req.setUsesLanguageCorrection_(True)
     roi = None
-    if chat_only:
+    if chat_only or region is not None:
         # Vision region of interest: normalized, origin BOTTOM-LEFT. Skipping the chat
         # list roughly halves OCR time. Note Vision then reports each observation's
         # bounding box RELATIVE TO THE ROI, so we convert back to full-window space.
-        roi = (CHAT_PANE_X_MIN, INPUT_AREA_Y_MIN,
-               1.0 - CHAT_PANE_X_MIN, 1.0 - INPUT_AREA_Y_MIN)
+        bottom = INPUT_AREA_Y_MIN if input_top is None else 1.0 - input_top
+        roi = region if region is not None else (CHAT_PANE_X_MIN, bottom, 1.0 - CHAT_PANE_X_MIN, 1.0 - bottom)
         req.setRegionOfInterest_(CGRectMake(*roi))
     handler.performRequests_error_([req], None)
 
@@ -238,64 +373,31 @@ def _vision_blocks(handler, languages, chat_only: bool) -> list[TextBlock]:
     return blocks
 
 
-def ocr(path: Path, languages=("zh-Hans",), chat_only: bool = True) -> list[TextBlock]:
-    """Vision OCR over the chat pane, from a PNG on disk.
-
-    zh-Hans alone: adding "en-US" bought nothing and cost time — on one screenshot the two
-    settings returned text identical *block for block* at 433 ms vs 303 ms, i.e. ~30% of the
-    OCR budget for no change in output. The zh-Hans model reads the Latin words that turn up
-    inside Chinese chat text (product names, URLs, "gpt"/"glm-4-fl") by itself.
-
-    Language correction stays ON (it costs ~30 ms more): it is what repairs ordinary OCR
-    slips such as 记亿力 for 记忆力, and one wrong character changes what the judge reads.
-
-    This is the fallback path; read_conversation() prefers the in-memory one.
-    """
-    import Vision
-    from Foundation import NSURL
-
-    url = NSURL.fileURLWithPath_(str(path))
-    handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
-    return _vision_blocks(handler, languages, chat_only)
-
-
 def capture_image(wid: int, nominal: bool = True):
-    """The window's pixels as a CGImage, without leaving the process. None when refused.
+    """Return a window image without calling cancellable-in-no-way CoreGraphics APIs.
 
-    Against `screencapture -l <wid>` writing a PNG, this is 4–29 ms versus 128–270 ms for the
-    same window with identical recognition results (10 blocks, same text) — the difference
-    being a subprocess spawn plus PNG encoding plus reading it back off disk. The capture
-    runs every second, so when it works the saving is continuous.
-
-    nominal=True captures at 1x instead of the default retina 2x: Vision's cost scales
-    with pixel count, and chat text at 1x is still ~15 px tall — measured on rendered
-    Chinese lines, recognition is identical block-for-block while OCR time roughly halves.
-    The layout constants are all normalized, so nothing downstream notices the resolution.
-    If a macOS update ever refuses the flag and returns NULL, read_conversation() falls
-    back to the subprocess route and the log says so — degraded to the old behaviour,
-    never broken.
-
-    It does NOT always work: the same call returns NULL once the display is asleep, while
-    `screencapture` keeps producing images. So callers must treat None as "use the slow
-    route" rather than an error — read_conversation() does exactly that, and reports which
-    route it took so a permanent fallback is visible instead of just feeling slow.
+    The timed subprocess route is deliberate: a Python thread cannot cancel
+    ``CGWindowListCreateImage`` after macOS enters ScreenCaptureKit, while this subprocess
+    can be terminated by ``capture_window`` when the system capture service stalls.
+    ``screencapture`` writes the window at its Retina backing scale; when ``nominal`` is
+    set the result is resampled down to the window's point size, keeping Vision OCR at
+    the measured 1x cost and pixel/point consumers at the size they were tuned on.
     """
-    import Quartz
     try:
-        opts = Quartz.kCGWindowImageBoundsIgnoreFraming
-        if nominal:
-            opts |= Quartz.kCGWindowImageNominalResolution
-        return Quartz.CGWindowListCreateImage(
-            Quartz.CGRectNull, Quartz.kCGWindowListOptionIncludingWindow, wid, opts)
+        with tempfile.TemporaryDirectory() as td:
+            png = Path(td) / "chat.png"
+            if not capture_window(wid, png):
+                return None
+            return _load_png_image(png, _window_point_size(wid) if nominal else None)
     except Exception:
         return None
 
 
-def ocr_image(image, languages=("zh-Hans",), chat_only: bool = True) -> list[TextBlock]:
-    """Same request as ocr(), fed a CGImage directly — no PNG encode, no temp file."""
+def ocr_image(image, languages=("zh-Hans",), chat_only: bool = True, input_top=None, region=None) -> list[TextBlock]:
+    """Same tuned Vision request, fed a CGImage directly — no PNG encode, no temp file."""
     import Vision
     handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(image, None)
-    return _vision_blocks(handler, languages, chat_only)
+    return _vision_blocks(handler, languages, chat_only, input_top, region)
 
 
 def warm_ocr() -> float:
@@ -303,7 +405,7 @@ def warm_ocr() -> float:
 
     The first text recognition in a process costs ~2x steady state (~0.7 s vs ~250 ms)
     while Vision loads its recognition model. Running that first request on a small white
-    image needs no WeChat window at all — it works even when WeChat starts after this
+    image needs no chat window at all — it works even when the app starts after this
     app — so the read loop's first real read finds the framework already paid for.
     Returns the elapsed milliseconds, or -1.0 when the request itself failed.
     """
@@ -329,7 +431,7 @@ def warm_ocr() -> float:
 _FP_W, _FP_H = 128, 224
 
 
-def _fingerprint(image) -> bytes | None:
+def _fingerprint(image, input_top=None) -> bytes | None:
     """The chat pane (title band down to just above the input box) as a small grayscale
     thumbnail; None when anything in the pipeline refuses.
 
@@ -351,7 +453,7 @@ def _fingerprint(image) -> bytes | None:
             image,
             Quartz.CGRectMake(int(CHAT_PANE_X_MIN * w), 0,
                               int((1.0 - CHAT_PANE_X_MIN) * w),
-                              int((1.0 - INPUT_AREA_Y_MIN) * h)))
+                              int((1.0 - INPUT_AREA_Y_MIN if input_top is None else input_top) * h)))
         cs = Quartz.CGColorSpaceCreateDeviceGray()
         buf = ctypes.create_string_buffer(_FP_W * _FP_H)
         ctx = Quartz.CGBitmapContextCreate(
@@ -397,20 +499,26 @@ def extract_chat_title(blocks: list[TextBlock]) -> str:
     """
     cands = [b for b in blocks
              if b.x >= CHAT_PANE_X_MIN and b.y > TITLE_BAR_Y_MAX
-             and b.conf >= 0.30 and len(b.text) >= 2 and not _is_noise(b)]
-    if not cands:
+             and not _is_noise(b)]
+    # No length cap on purpose: an empty title collides reply keys across chats
+    # (key = (chat_title, text)), which is worse than the occasional single-glyph
+    # OCR smudge promoted to a title.
+    # Chat titles are left-aligned; centered headers would need layout detection.
+    # A real contact name can be one character, so length cannot tell title from controls.
+    starts = [b for b in cands if b.x < (CHAT_PANE_X_MIN + 1) / 2]
+    if not starts:
         return ""
-    cands.sort(key=lambda b: (-b.y, -len(b.text)))
-    top_y = cands[0].y
-    band = [b for b in cands if top_y - b.y < 0.03]
-    # the header also contains the chat-info / call / menu glyphs, which OCR turns into
-    # short junk. The conversation name is by far the longest run of text up there.
-    longest = max(band, key=lambda b: len(b.text))
-    if len(longest.text) < 4:
-        return ""
-    keep = sorted((b for b in band if len(b.text) >= len(longest.text) * 0.5),
-                  key=lambda b: b.x)
-    return " ".join(b.text for b in keep).strip()
+    top_y = max(b.y for b in starts)
+    band = sorted((b for b in cands if abs(top_y - b.y) < 0.03), key=lambda b: b.x)
+    keep = [band[0]]
+    for b in band[1:]:
+        # Join adjacent OCR fragments, including a short suffix; stop before controls.
+        if b.x - keep[-1].x_right > 1.5 * max(b.h, keep[-1].h):
+            break
+        keep.append(b)
+    title = " ".join(b.text for b in keep).strip()
+    # The app appends a changing member count; it is not part of the conversation key.
+    return re.sub(r"\s*[（(]\s*\d+\s*[）)]\s*$", "", title).strip()
 
 
 def message_side(x: float, width: float) -> str:
@@ -428,10 +536,11 @@ def message_side(x: float, width: float) -> str:
     return "unknown"
 
 
-def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Message]:
+def extract_messages(blocks: list[TextBlock], max_messages: int = 12, input_top=None) -> list[Message]:
     """Turn raw OCR blocks into an ordered list of chat messages (bottom = newest)."""
     chat = [b for b in blocks
-            if b.x >= CHAT_PANE_X_MIN and INPUT_AREA_Y_MIN < b.y < TITLE_BAR_Y_MAX
+            if b.x >= CHAT_PANE_X_MIN
+            and (INPUT_AREA_Y_MIN if input_top is None else 1.0 - input_top) < b.y < TITLE_BAR_Y_MAX
             and not _is_noise(b)]
     if not chat:
         return []
@@ -465,8 +574,23 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
 
     # fold continuation lines (same side, tight vertical gap, no new sender header)
     per_line = sorted(merged, key=lambda b: b.y)
+    # Classify sender headers BEFORE folding; otherwise a tight nickname/body pair
+    # becomes one multiline message and the old post-fold name detector misses it.
+    # Compare adjacent font heights rather than a fraction of the window height.
+    headers = set()
+    for i, b in enumerate(per_line[:-1]):
+        nxt = per_line[i + 1]
+        if (message_side(b.x, b.w) == message_side(nxt.x, nxt.w) == "them"
+                and len(b.text) <= 32 and b.h <= nxt.h * .88
+                and abs(b.x - nxt.x) < .03
+                and b.h <= nxt.y - b.y <= max(.16, b.h * 4)):
+            headers.add(i)
     messages: list[Message] = []
-    for b in per_line:
+    pending_sender = None
+    for i, b in enumerate(per_line):
+        if i in headers:
+            pending_sender = b.text.strip().rstrip("：:")
+            continue
         side = message_side(b.x, b.w)
         # fold against the LAST folded line, not the message's first: comparing against
         # the first line made every line from the third on measure ≥2 line-pitches away,
@@ -478,7 +602,7 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
         aligned = messages and abs(b.x - messages[-1].x) < 0.02
         compatible = messages and (side == messages[-1].side
                                    or "unknown" in (side, messages[-1].side))
-        if aligned and compatible and 0 <= gap < 0.045:
+        if pending_sender is None and aligned and compatible and 0 <= gap < 0.045:
             messages[-1].lines.append(b.text)
             messages[-1].text = "\n".join(messages[-1].lines)
             messages[-1].conf = min(messages[-1].conf, b.conf)
@@ -494,31 +618,17 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
         else:
             messages.append(Message(text=b.text, side=side, y=b.y, conf=b.conf,
                                     h=b.h, lines=[b.text], x=b.x, w=b.w,
-                                    last_y=b.y))
+                                    last_y=b.y, sender=pending_sender))
+            pending_sender = None
 
-    # in group chats WeChat renders the sender name as a short line above the bubble.
-    # A wider-than-usual gap after a short line is the tell; that line becomes the
-    # following message's sender rather than a message of its own.
-    named: list[Message] = []
-    for i, m in enumerate(messages):
-        nxt = messages[i + 1] if i + 1 < len(messages) else None
-        if (m.side == "them" and nxt is not None and nxt.side == m.side and len(m.text) <= 16
-                and "\n" not in m.text
-                # two independent signals: the name line is set in smaller type and the
-                # line under it is set in message-sized type. Both must agree — a wrong
-                # name is worse than no name.
-                and m.h < USERNAME_H_MAX and nxt.h >= MESSAGE_H_MIN
-                and (nxt.y - m.y) > 0.035):
-            nxt.sender = m.text.strip().rstrip("：:")
-            continue
-        # A small-type line with nothing message-sized under it is a stray sender name
-        # (WeChat renders one above every bubble, including image-only messages). It is
-        # never something to judge. Our own bubbles have no sender name above them;
-        # short outgoing text can be just as small, especially in a tall window.
-        if (m.side == "them" and m.h < USERNAME_H_MAX
-                and len(m.text) <= 16 and "\n" not in m.text):
-            continue
-        named.append(m)
+    # Stray sender names: the app renders one above every bubble — including
+    # image-only messages, whose media OCR cannot read — so a short them line that
+    # ended up as a message of its own is a name, never something to judge. Our own
+    # bubbles have no name above them, and short outgoing text can be just as small
+    # in a tall window, so only the them side is dropped. (#62)
+    named = [m for m in messages
+             if not (m.side == "them" and "\n" not in m.text
+                     and len(m.text) <= 16 and m.h < USERNAME_H_MAX)]
     return named[-max_messages:]
 
 
@@ -536,59 +646,127 @@ def looks_like_sender_name(msg: Message, following: Message | None) -> bool:
 # ---------------------------------------------------------------------- public API
 
 
+def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0):
+    """Explicit selected region. Never infer a fill target from a message selection.
+
+    capture_ms: time read_conversation already spent finding the window and capturing
+    before handing us the pixels. Timing is reported from the caller's t0, same
+    caliber as the plain path — without it this branch reported capture=0 and the
+    real capture cost vanished from the read log (#110).
+    """
+    from calibrated_messages import extract, recover_numeric_bubbles
+    t0 = time.perf_counter()
+    x,y,w,h = calibration.rect()
+    blocks = ocr_image(image, region=(x,1-y-h,w,h))
+    header = ocr_image(image, region=(x,1-y,w,y))
+    candidates = [b for b in header if not _is_noise(b) and b.x < x+w*.75]
+    title = ""
+    if candidates:
+        top = max(b.y+b.h for b in candidates)
+        line = [b for b in candidates if top-(b.y+b.h) < b.h*.6]
+        title = " ".join(b.text for b in sorted(line,key=lambda b:b.x))
+    blocks = recover_numeric_bubbles(image, blocks, (x,y,w,h))
+    msgs = extract(image, blocks, (x,y,w,h), max_messages)
+    elapsed = (time.perf_counter()-t0)*1000
+    return {"ok": True, "unchanged": False, "window": window, "messages": msgs,
+            "chat_title": title, "n_blocks": len(blocks), "fingerprint": None,
+            "layout": (window['wid'],window['w'],window['h'],calibration.serialize()),
+            "input_rect": None, "manual_calibration": True,
+            "timing_ms": {"capture":capture_ms, "ocr":elapsed,
+                          "total":capture_ms+elapsed, "capture_path":"manual"}}
+
+
 def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
-                      prev_fingerprint: bytes | None = None) -> dict:
+                      prev_fingerprint: bytes | None = None, prev_layout=None, calibration=None) -> dict:
     """One-shot read: find window -> capture -> OCR -> messages.
 
     Pass the previous call's "fingerprint" and an unchanged chat pane short-circuits
     before OCR: ok=True with "unchanged": True, empty messages, and the window's current
     geometry — the caller reuses what it last read and keeps positioning from fresh
-    coordinates. The fingerprint only exists on the in-process capture path; the
-    subprocess fallback returns fingerprint=None, which never matches (a permanently
-    slower read stays visible instead of silently skipping).
+    coordinates. The layout key must also match: resizing the window or input panel
+    always forces fresh extraction. Both capture paths use the same image for the
+    input boundary, fingerprint and OCR; an unresolved boundary yields no messages.
     """
     t0 = time.perf_counter()
     win = find_wechat_window(previous_wid)
     if win is None:
-        return {"ok": False, "error": "WeChat main window not found", "messages": []}
+        return {"ok": False, "error": "Chat main window not found", "messages": []}
 
-    # In-process capture + OCR off the CGImage is the fast path (~250 ms for the pair).
-    # The subprocess + PNG route stays as the fallback: it is ~150 ms slower, but it is the
-    # one that still worked when CGWindowListCreateImage had nothing to give.
-    image = capture_image(win.wid)
-    fingerprint = _fingerprint(image) if image is not None else None
+    # Always use the subprocess path in production. A Python thread cannot cancel
+    # CGWindowListCreateImage once macOS enters ScreenCaptureKit, while a timed
+    # subprocess can be terminated and the HUD worker remains reusable.
+    image = None
+    capture_path = "subprocess"
     window = {"wid": win.wid, "title": win.title, "w": win.w, "h": win.h,
               "x": win.x, "y": win.y}
-    if _same_frame(fingerprint, prev_fingerprint):
+    # Use the same captured pixels for the input boundary and OCR. Never reuse a
+    # previous window's boundary after resizing or switching windows.
+    if image is None:
+        with tempfile.TemporaryDirectory() as td:
+            png = Path(td) / "chat.png"
+            if capture_window(win.wid, png):
+                image = _load_png_image(png)
+    if calibration is not None:
+        if image is None:
+            return {"ok": False, "error": "capture failed", "messages": []}
+        if not calibration.matches(win):
+            return {"ok": True, "unchanged": False, "messages": [], "window": window,
+                    "calibration_error": "窗口尺寸已改变，请重新校准消息区域。"}
+        capture_ms = (time.perf_counter() - t0) * 1000
+        return read_calibrated(image, calibration, window, max_messages,
+                               capture_ms=capture_ms)
+    from input_region import input_outline
+    try:
+        outline = input_outline(image) if image is not None else None
+    except Exception:
+        outline = None
+    # AX is a fallback for themes with no visible separator. Its text-area top is
+    # sufficient to exclude drafts, even if the toolbar above it remains visible.
+    if outline is None:
+        import fill
+        target = fill.locate_input(window)
+        rect = target.get("rect")
+        if rect:
+            x, y, w, h = rect
+            outline = ((x-win.x)/win.w, (y-win.y)/win.h, w/win.w, h/win.h)
+    input_top = outline[1] if outline else None
+    if input_top is not None and not .2 < input_top < .95:
+        outline = None
+        input_top = None
+    layout = (win.wid, win.w, win.h, input_top)
+    visual_rect = ((win.x + outline[0]*win.w, win.y + outline[1]*win.h,
+                    outline[2]*win.w, outline[3]*win.h) if outline else None)
+    fingerprint = _fingerprint(image, input_top) if image is not None and outline else None
+    if layout == prev_layout and _same_frame(fingerprint, prev_fingerprint):
         total = (time.perf_counter() - t0) * 1000
+        timing = {"capture": total, "ocr": 0.0, "total": total,
+                  "capture_path": capture_path}
         return {"ok": True, "unchanged": True, "messages": [], "fingerprint": fingerprint,
                 "chat_title": "", "window": window, "n_blocks": 0,
-                "timing_ms": {"capture": total, "ocr": 0.0, "total": total,
-                              "capture_path": "memory"}}
+                "layout": layout, "input_rect": visual_rect,
+                "timing_ms": timing}
 
     t_cap = time.perf_counter()
-    capture_path = "memory" if image is not None else "subprocess"
-    if image is not None:
-        blocks = ocr_image(image)
-        t_ocr = time.perf_counter()
-    else:
-        with tempfile.TemporaryDirectory() as td:
-            png = Path(td) / "wechat.png"
-            if not capture_window(win.wid, png):
-                return {"ok": False, "error": "capture failed", "messages": []}
-            t_cap = time.perf_counter()
-            blocks = ocr(png)
-            t_ocr = time.perf_counter()
+    if image is None:
+        return {"ok": False, "error": "capture failed", "messages": []}
+    blocks = ocr_image(image, input_top=input_top)
+    t_ocr = time.perf_counter()
 
-    msgs = extract_messages(blocks, max_messages=max_messages)
+    chat_title = extract_chat_title(blocks)
+    msgs = (extract_messages(blocks, max_messages=max_messages, input_top=input_top)
+            if outline else [])
+    timing = {"capture": (t_cap - t0) * 1000, "ocr": (t_ocr - t_cap) * 1000,
+              "total": (t_ocr - t0) * 1000, "capture_path": capture_path}
     return {
         "ok": True,
         "unchanged": False,
-        "chat_title": extract_chat_title(blocks),
+        "layout": layout,
+        "input_rect": visual_rect,
+        "input_unresolved": outline is None,
+        "chat_title": chat_title,
         "window": window,
         "messages": msgs,
-        "timing_ms": {"capture": (t_cap - t0) * 1000, "ocr": (t_ocr - t_cap) * 1000,
-                      "total": (t_ocr - t0) * 1000, "capture_path": capture_path},
+        "timing_ms": timing,
         "n_blocks": len(blocks),
         "fingerprint": fingerprint,
     }

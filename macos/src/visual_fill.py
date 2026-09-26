@@ -58,7 +58,7 @@ def same_signature(a, b):
     return a is not None and b is not None and len(a)==len(b) and sum(abs(x-y)>=12 for x,y in zip(a,b))<8
 
 
-def input_text(win, rect):
+def input_text(win, rect, exclude_toolbar=True):
     from perception import capture_image, ocr_image
     image=capture_image(win['wid'])
     if image is None:
@@ -69,7 +69,8 @@ def input_text(win, rect):
         (x-win['x'])*iw/win['w'],(y-win['y'])*ih/win['h'],w*iw/win['w'],h*ih/win['h']))
     blocks=ocr_image(crop,chat_only=False)
     # Exclude the toolbar at the very bottom, but retain the entire draft above it.
-    blocks=[b for b in blocks if b.y > .18]
+    if exclude_toolbar:
+        blocks=[b for b in blocks if b.y > .18]
     blocks.sort(key=lambda b:(-round(b.y,2),b.x))
     return ''.join(b.text for b in blocks if b.text.replace(' ', '') not in ('按住鼠标语音输入文字','发送'))
 
@@ -86,11 +87,19 @@ def write_text(text, target, app):
     global _LAST_ATTEMPT
     win=target['window']
     if not window_is_current(win,app):
-        return False,'微信窗口已变化，请等检测框更新后重试'
-    rect=locate_visual_input(win)
+        return False,'聊天窗口已变化，请等检测框更新后重试'
+    manual = target.get('manual_region')
+    if manual is not None:
+        from types import SimpleNamespace
+        if not manual.matches(SimpleNamespace(w=win['w'],h=win['h'])):
+            return False,'窗口尺寸已变化，请重新校准输入区'
+        rect=manual.screen_rect(win)
+    else:
+        rect=locate_visual_input(win)
     if not fill._same_rect(rect,target.get('visual_rect')):
         return False,'输入区已变化，请等检测框更新后重试'
-    signature=chat_signature(win,rect)
+    signature_rect=target.get("signature_rect",rect)
+    signature=chat_signature(win,signature_rect)
     if not same_signature(signature,target.get('chat_signature')):
         return False,'会话已变化，请等待识别更新后重试'
     text=plain_text(text)
@@ -99,43 +108,60 @@ def write_text(text, target, app):
     stamp=(win['wid'],text)
     if _LAST_ATTEMPT and _LAST_ATTEMPT[0]==stamp and time.monotonic()-_LAST_ATTEMPT[1]<3:
         return False,'刚尝试过填入，请先检查输入框，避免重复'
-    before=input_text(win,rect)
+    before=input_text(win,rect,exclude_toolbar=False) if manual else input_text(win,rect)
     if before is None:
         return False,'无法读取输入区，已停止填入'
     if before.strip():
         return False, '输入区已有草稿；请使用复制手动插入，避免改动现有内容'
     # A physical click raises the target window; never type on activation intent alone.
+    # The synthetic click moves the real cursor to the input area; remember where it
+    # was so the gesture can hand it back (#107) — the user's next click is usually a
+    # tone switch or another candidate on the panel.
     x,y,w,h=rect
     point=(x+min(80,w/4),y+min(h*.5,max(20,h-60)))
-    app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
-    time.sleep(.15)
-    if not window_is_current(win,app,require_front=True):
-        return False,'微信没有获得焦点，请先点微信输入区再重试'
-    for event_type in (Q.kCGEventLeftMouseDown,Q.kCGEventLeftMouseUp):
-        event=Q.CGEventCreateMouseEvent(None,event_type,point,Q.kCGMouseButtonLeft)
-        Q.CGEventSetFlags(event, 0)
-        Q.CGEventSetIntegerValueField(event, Q.kCGMouseEventClickState, 1)
-        Q.CGEventPost(Q.kCGHIDEventTap,event)
-    time.sleep(.15)
-    if not window_is_current(win,app,require_front=True):
-        return False,'焦点发生变化，已停止填入'
-    if not same_signature(chat_signature(win,rect),signature):
-        return False,'会话已变化，已停止填入'
-    _LAST_ATTEMPT=(stamp,time.monotonic())
-    for offset in range(0,len(text),20):
-        if (not window_is_current(win,app,require_front=True)
-                or not same_signature(chat_signature(win,rect),signature)):
-            return False,'窗口或会话变化，输入已中止；请检查草稿，勿重复点击'
-        chunk=text[offset:offset+20]
-        for down in (True,False):
-            event=Q.CGEventCreateKeyboardEvent(None,0,down)
-            Q.CGEventSetFlags(event,0)
-            Q.CGEventKeyboardSetUnicodeString(event,len(chunk.encode('utf-16-le'))//2,chunk)
+    saved_cursor=Q.CGEventGetLocation(Q.CGEventCreate(None))
+    clicked=False
+    try:
+        app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+        time.sleep(.15)
+        if not window_is_current(win,app,require_front=True):
+            return False,'聊天应用没有获得焦点，请先点聊天输入区再重试'
+        for event_type in (Q.kCGEventLeftMouseDown,Q.kCGEventLeftMouseUp):
+            event=Q.CGEventCreateMouseEvent(None,event_type,point,Q.kCGMouseButtonLeft)
+            Q.CGEventSetFlags(event, 0)
+            Q.CGEventSetIntegerValueField(event, Q.kCGMouseEventClickState, 1)
             Q.CGEventPost(Q.kCGHIDEventTap,event)
-        time.sleep(.03)
-    time.sleep(.25)
-    after=input_text(win,rect)
-    normalize=lambda s: ''.join(c for c in unicodedata.normalize('NFKC',s) if not c.isspace())
-    if after is not None and normalize(text) in normalize(after) and after != before:
-        return True,'已填入（视觉校验，未发送）'
-    return False,'已尝试输入，画面未能确认；请检查草稿，勿重复点击'
+        clicked=True
+        time.sleep(.15)
+        if not window_is_current(win,app,require_front=True):
+            return False,'焦点发生变化，已停止填入'
+        if not same_signature(chat_signature(win,signature_rect),signature):
+            return False,'会话已变化，已停止填入'
+        if manual:
+            current_draft=input_text(win,rect,exclude_toolbar=False)
+            if current_draft is None or current_draft.strip():
+                return False,'输入区内容发生变化，已停止填入'
+        _LAST_ATTEMPT=(stamp,time.monotonic())
+        for offset in range(0,len(text),20):
+            if (not window_is_current(win,app,require_front=True)
+                    or not same_signature(chat_signature(win,signature_rect),signature)):
+                return False,'窗口或会话变化，输入已中止；请检查草稿，勿重复点击'
+            chunk=text[offset:offset+20]
+            for down in (True,False):
+                event=Q.CGEventCreateKeyboardEvent(None,0,down)
+                Q.CGEventSetFlags(event,0)
+                Q.CGEventKeyboardSetUnicodeString(event,len(chunk.encode('utf-16-le'))//2,chunk)
+                Q.CGEventPost(Q.kCGHIDEventTap,event)
+            time.sleep(.03)
+        time.sleep(.25)
+        after=input_text(win,rect,exclude_toolbar=False) if manual else input_text(win,rect)
+        normalize=lambda s: ''.join(c for c in unicodedata.normalize('NFKC',s) if not c.isspace())
+        if after is not None and normalize(text) in normalize(after) and after != before:
+            return True,'已填入（视觉校验，未发送）'
+        return False,'已尝试输入，画面未能确认；请检查草稿，勿重复点击'
+    finally:
+        if clicked:
+            # Hand the cursor back: a plain move posts no button state, changes nothing
+            # in the target app, and the fill gesture is already finished here.
+            event=Q.CGEventCreateMouseEvent(None,Q.kCGEventMouseMoved,saved_cursor,Q.kCGMouseButtonLeft)
+            Q.CGEventPost(Q.kCGHIDEventTap,event)

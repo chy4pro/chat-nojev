@@ -1,12 +1,22 @@
-jev-chat-jarvis（macOS）— chat-nojev 改版
-=========================================
+jev-chat-jarvis（Jev 聊天助手 · macOS）— chat-nojev 改版
+Copyright © 2026 eatmoreduck 与 jev-chat 贡献者
 
-本目录是 https://github.com/jev-chat/jev-chat-jarvis-mac 的二次开发。
-上游以 MIT 协议开源，版权归 eatmoreduck 所有（见 LICENSE，逐字照抄上游）。
+本软件以 MIT 协议授权（见 LICENSE）。
+
+分发或商用时请保留本文件与 LICENSE，并在产品「关于」页、说明文档或
+发布页注明来源，推荐写法：
+
+    基于 Jev 聊天助手（https://github.com/jev-chat/jev-chat-jarvis-mac）二次开发
+
+未经许可，不要使用「Jev 聊天助手」「jev-chat」名称或 jev-jarvis.com 域名，
+暗示产品由原作者出品或背书。
+
+本项目为独立开源项目，与其所交互的各聊天应用及其出品方均无关联。
+
 意图/风险那套题目和判断口径来自 Jev 聊天助手（https://github.com/jev-chat/jev-chat-jarvis），
 版权归 Finderchangchang and the jev-chat contributors 所有。
 
-上游**没有** NOTICE 文件，这一份是本仓库自己加的：说清改了什么，以及 MIT 要求的出处。
+以上是上游的 NOTICE，逐字保留。下面这一节是本仓库自己加的：说清这一份改了什么。
 
 改了什么
 --------
@@ -22,9 +32,11 @@ jev-chat-jarvis（macOS）— chat-nojev 改版
   actions / message / backend`，键和值都是原来那些，**只是产出方换了**。
 - 因为写候选和打分的是同一个模型，`confidence` 和那两张概率表现在是模型的**自评**，
   不是上游判断模型那种校准过的概率。
-- **删掉了本地判断模型**（`Mapika/decider-2b`，约 7GB 权重）和云端 TypeSafe Jev 客户端。
+- **删掉了本地判断模型**（`Mapika/decider-2b`，权重实测约 3.8 GB）和云端 TypeSafe Jev 客户端。
   一起没有的是**离线判断**：上游不配任何 key 也能出意图和风险，这一版不行。
   这是功能上的损失，不只是少个模型；来龙去脉和「要怎么加回来」写在 `src/questions.py` 顶部。
+  上游围着那个本地模型做的下载进度、首次引导选判断方式、离线缓存加载与国内镜像回退，
+  这一版都没有对应物。
 - 意图不再限定在那 8 个标签里：分类器只能在闭集里选，通用模型可以直接写出要显示的那句话
   （用对话那门语言）。标签和描述仍然用来把题目说清楚，面板显示模型自己写的短语。
 - 「具体行动」那一行上游是按意图查一张静态表（`ACTION_MAP`，注释写着「no generation
@@ -34,20 +46,13 @@ jev-chat-jarvis（macOS）— chat-nojev 改版
   适配层**：适配层只搬键。同一份坏值的兜底改在用的地方（`src/hud.py` 的
   `_judgment_text` / `_risk_level` / `_confidence_text` / `_actions_text` / `_prob_text`）。
   为什么这样做、和上游到底差在哪几处，见 `docs/EQUIVALENCE.md`。
-- 设置页少了一页（「判断 · Jev」），配置里少了一组 `TYPESAFE_*`：全程只剩一把 key。
+- 设置页少了一节（「判断 · Jev」和离线模型那一块），配置里少了一组 `TYPESAFE_*`
+  和 `JUDGE_BACKEND`：全程只剩一把 key。
 - 依赖少了 `torch` / `transformers` / `huggingface-hub` / `laya`——本地不再加载任何模型。
 - 删掉的文件：`src/judge.py`、`src/judge_jev.py`、`src/judge_zh_test.py`
   （最后那个是 decider-2b 的 22 条中文回归，测的是已经不在的模型）。
 
 除此之外，`macos/` 里其余部分都是上游的 macOS 应用。
-
-继承自上游的义务
-----------------
-
-- 分发本软件或其衍生作品时必须保留 LICENSE 与本 NOTICE，并注明出处，
-  例如「基于 jev-chat-jarvis-mac（https://github.com/jev-chat/jev-chat-jarvis-mac）二次开发」。
-- 不得使用「jev-chat-jarvis」「Jev 聊天助手」「jev-chat」等名称或 chatjevs.com 域名
-  暗示由原作者出品或背书。本仓库与原作者无关联。
 
 第三方组件
 ----------
@@ -55,6 +60,7 @@ jev-chat-jarvis（macOS）— chat-nojev 改版
 | 组件 | 许可证 | 备注 |
 | --- | --- | --- |
 | PyObjC（Cocoa / Quartz / Vision / ApplicationServices） | MIT | 悬浮窗、抓图、OCR、辅助功能写入 |
+| NumPy | BSD-3-Clause | 手动区域校准的几何计算 |
 
 上游还依赖 torch（BSD-3-Clause）、transformers（Apache-2.0）、huggingface-hub
 （Apache-2.0）和 laya，全部是本地判断模型用的；这一版不再依赖它们。

@@ -20,6 +20,19 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/jev-jarvis.app"
 BUNDLE_ID="info.jevjarvis.app"
 
+# Every local install must include and exercise the capture recovery regressions.
+# Run before replacing the previous build so a failed check leaves it intact.
+echo "==> 抓图恢复与 HUD 回归检查"
+test -f "$ROOT/tests/test_capture_recovery.py"
+if [ -n "${JEV_TEST_PYTHON:-}" ]; then
+    "$JEV_TEST_PYTHON" -B -m unittest discover -s "$ROOT/tests"
+elif [ -x "$ROOT/.venv/bin/python" ]; then
+    "$ROOT/.venv/bin/python" -B -m unittest discover -s "$ROOT/tests"
+else
+    uv run --directory "$ROOT" --frozen python -B -m unittest discover -s "$ROOT/tests"
+fi
+BUILD_REVISION="$(git -C "$ROOT" rev-parse --short HEAD)"
+
 # the version has exactly one home: pyproject.toml
 VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' "$ROOT/pyproject.toml" | head -1)"
 if [ -z "$VERSION" ]; then
@@ -43,8 +56,10 @@ cp -R src "$APP/Contents/Resources/app/src"
 cp pyproject.toml uv.lock README.md .python-version "$APP/Contents/Resources/app/"
 mkdir -p "$APP/Contents/Resources/app/packaging"
 cp packaging/bootstrap_uv.sh "$APP/Contents/Resources/app/packaging/"
-# MIT requires the copyright notice to travel with a distributed copy
+# MIT requires the copyright notice to travel with a distributed copy;
+# NOTICE asks the same of itself on redistribution (#86)
 if [ -f LICENSE ]; then cp LICENSE "$APP/Contents/Resources/app/"; fi
+if [ -f NOTICE ]; then cp NOTICE "$APP/Contents/Resources/app/"; fi
 if [ -f .env.example ]; then cp .env.example "$APP/Contents/Resources/app/"; fi
 # never ship local secrets or caches
 rm -rf "$APP/Contents/Resources/app/src/__pycache__"
@@ -60,19 +75,26 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>       <string>jev-chat-jarvis</string>
     <key>CFBundleIdentifier</key>        <string>${BUNDLE_ID}</string>
     <key>CFBundleVersion</key>           <string>${VERSION}</string>
+    <key>JEVBuildRevision</key>          <string>${BUILD_REVISION}</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleExecutable</key>        <string>jev-jarvis</string>
     <key>CFBundleIconFile</key>          <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
+    <!-- torch ships no x86_64 macOS wheel (#19): keep the app on arm64 even when
+         Finder "Open using Rosetta" is ticked, instead of dying at first uv sync -->
+    <key>LSArchitecturePriority</key>
+    <array>
+        <string>arm64</string>
+    </array>
     <!-- floating helper: no Dock icon, never becomes the active app -->
     <key>LSUIElement</key>               <true/>
     <key>NSHighResolutionCapable</key>   <true/>
     <!-- permission prompts are shown by the system; these strings explain why -->
     <key>NSScreenCaptureUsageDescription</key>
-    <string>jev-chat-jarvis 需要读取微信窗口的画面，才能在本地识别消息文字（不上传）。</string>
+    <string>jev-chat-jarvis 需要读取聊天窗口的画面，才能在本地识别消息文字（不上传）。</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>jev-chat-jarvis 需要把选中的回复粘贴到微信输入框。</string>
+    <string>jev-chat-jarvis 需要把选中的回复粘贴到聊天输入框。</string>
 </dict>
 </plist>
 PLIST
@@ -82,6 +104,7 @@ cat > "$APP/Contents/Resources/launcher.zsh" <<'LAUNCHER'
 #!/bin/zsh
 # Bootstrap: prepare the uv environment, then run the app under the native launcher.
 set -u
+export PYTHONDONTWRITEBYTECODE=1  # keep the signed app bundle immutable at runtime
 
 RES="$(cd "$(dirname "$0")" && pwd)"
 SUPPORT="$HOME/Library/Application Support/jev-jarvis"
@@ -93,11 +116,6 @@ mkdir -p "$SUPPORT" "$(dirname "$LOG")"
 # Finder launches have a minimal PATH; add the usual install locations for uv
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-# user-level env (API keys). Lives OUTSIDE the repo so it can never be committed, in the
-# one location the README documents — a Finder launch inherits no shell environment at all,
-# so sourcing here is the only chance to pick the keys up before Python also reads them.
-[ -f "$CONFIG/env" ] && source "$CONFIG/env"
-
 log() { print -r -- "[$(date '+%F %T')] $*" >> "$LOG"; }
 
 die() {  # show a native dialog, then exit
@@ -107,6 +125,10 @@ die() {  # show a native dialog, then exit
 }
 
 source "$RES/app/packaging/bootstrap_uv.sh" || die "包内缺少 uv 安装脚本，请重新下载应用"
+jev_load_env "$CONFIG/env"
+if ! jev_check_arch; then
+    die "$JEV_ARCH_ERROR"
+fi
 if ! command -v uv >/dev/null 2>&1; then
     # non-blocking: a Finder launch has no terminal, and a silent multi-minute wait
     # for uv + deps is indistinguishable from "the app is broken"
@@ -163,6 +185,7 @@ if ! xcrun --find clang >/dev/null 2>&1; then
     exit 1
 fi
 xcrun clang -std=c11 -Os -Wall -Wextra -Werror \
+    -arch arm64 \
     -mmacosx-version-min=13.0 \
     "$ROOT/packaging/launcher.c" -o "$APP/Contents/MacOS/jev-jarvis"
 
@@ -192,13 +215,17 @@ check() {  # fail the build instead of shipping a broken bundle silently
 check "Info.plist 合法"            "plutil -lint '$APP/Contents/Info.plist'"
 check "启动器可执行"                "[ -x '$APP/Contents/MacOS/jev-jarvis' ]"
 check "启动器是原生 Mach-O"         "file '$APP/Contents/MacOS/jev-jarvis' | grep -q 'Mach-O'"
+check "启动器仅含 arm64 切片"        "lipo -archs '$APP/Contents/MacOS/jev-jarvis' | grep -qw arm64"
+check "Info.plist 声明仅 arm64"     "plutil -extract LSArchitecturePriority.0 raw '$APP/Contents/Info.plist' | grep -q arm64"
 check "bootstrap 可执行"            "[ -x '$APP/Contents/Resources/launcher.zsh' ]"
 check "源码进包（hud.py）"          "[ -f '$APP/Contents/Resources/app/src/hud.py' ]"
 check "锁文件进包（uv.lock）"        "[ -f '$APP/Contents/Resources/app/uv.lock' ]"
 check "uv 安装脚本进包"             "[ -f '$APP/Contents/Resources/app/packaging/bootstrap_uv.sh' ]"
 check "Python 版本进包"             "[ -f '$APP/Contents/Resources/app/.python-version' ]"
 check "许可证进包（MIT）"           "[ -f '$APP/Contents/Resources/app/LICENSE' ]"
+check "通知文件进包（NOTICE）"       "[ -f '$APP/Contents/Resources/app/NOTICE' ]"
 check "依赖版本已冻结到 $PY_PIN"     "grep -q '${PY_PIN}' '$APP/Contents/Resources/launcher.zsh'"
+check "运行时不会改写已签名包"       "grep -q '^export PYTHONDONTWRITEBYTECODE=1' '$APP/Contents/Resources/launcher.zsh'"
 check "没夹带缓存"                  "[ ! -d '$APP/Contents/Resources/app/src/__pycache__' ]"
 # a key that leaked into src/ would ship to whoever gets the bundle. src/builtin.py is the
 # single deliberate exception — it holds the shared default that lets an unconfigured install

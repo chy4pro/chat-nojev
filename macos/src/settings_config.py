@@ -12,7 +12,9 @@ import urllib.error
 import urllib.parse
 
 import userconfig
+from chat_context import message_limit
 from generate import _endpoint, http_post_json, Generator, ThinkingOnlyError
+import styles
 
 # 上游这里还有一组 TYPESAFE_*：判断层（TypeSafe Jev）自己的地址、key 和模型。
 # 判断合进了生成那一次调用，那一组配置没有对应物了，设置页也就只剩一节模型。
@@ -36,12 +38,22 @@ def write_settings(path: Path, original: str, changes: dict[str, str]) -> str:
     """Change only edited assignments, preserve other lines, replace atomically at 0600."""
     if read_document(path) != original:
         raise ValueError("配置文件已被其他程序修改，请关闭设置窗口后重新打开。")
-    allowed = {f"{p}_{f}" for p in PREFIXES for f in FIELDS}
+    # 上游这里还允许 JUDGE_BACKEND（首次引导选判断方式、设置页那节离线模型写的就是它）。
+    # 判断合进了生成那一次调用，没有判断方式可选，那个键也就没有对应物了。
+    allowed = {f"{p}_{f}" for p in PREFIXES for f in FIELDS} | {
+        "JEV_HISTORY", "JEV_CONTEXT_MESSAGES",
+        "JEV_MESSAGE_REGION", "JEV_INPUT_REGION", "JEV_CANDIDATES_PER_TONE"}
     if not changes.keys() <= allowed:
         raise ValueError("不支持的配置项。")
     for value in changes.values():
         if any(c in value for c in "\r\n\0"):
             raise ValueError("配置值不能含换行或空字符。")
+    if "JEV_CONTEXT_MESSAGES" in changes:
+        message_limit(changes["JEV_CONTEXT_MESSAGES"])
+    if "JEV_HISTORY" in changes and changes["JEV_HISTORY"] not in ("0", "1"):
+        raise ValueError("历史记录开关必须是 0 或 1")
+    if "JEV_CANDIDATES_PER_TONE" in changes:
+        styles.validate_candidate_count(changes["JEV_CANDIDATES_PER_TONE"])
     remaining = dict(changes)
     lines = []
     for line in original.splitlines(keepends=True):
@@ -98,6 +110,7 @@ def list_models(prefix: str, base: str, key: str) -> list[str]:
         p = urllib.parse.urlsplit(url)
         path = p.path + ("?after_id=" + urllib.parse.quote(after, safe="") if after else "")
         cls = http.client.HTTPSConnection if p.scheme == "https" else http.client.HTTPConnection
+        assert p.hostname is not None  # validate_endpoint checked the host above.
         conn = cls(p.hostname, p.port, timeout=15)
         try:
             conn.request("GET", path, headers=headers)

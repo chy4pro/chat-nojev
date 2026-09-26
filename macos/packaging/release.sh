@@ -113,8 +113,14 @@ if [ "$PUBLISH" = 1 ]; then
     command -v gh >/dev/null 2>&1 || { echo "    没装 gh，先 brew install gh" >&2; exit 1; }
     TAG="v$VERSION"
     if git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-        echo "    标签 $TAG 已存在，先在 pyproject.toml 里升版本" >&2
-        exit 1
+        # tag 触发的 Release workflow 里 HEAD 就是刚推的 tag——这是正常发布场景，放行；
+        # 其余情况（本地误发旧版）维持防呆报错
+        if [ "$(git -C "$ROOT" rev-parse "$TAG")" = "$(git -C "$ROOT" rev-parse HEAD)" ]; then
+            echo "    标签 $TAG 已存在且指向当前提交（tag 触发场景），继续发布"
+        else
+            echo "    标签 $TAG 已存在但不指向当前提交，先在 pyproject.toml 里升版本" >&2
+            exit 1
+        fi
     fi
     NOTES="$TMP/notes.md"
     {
@@ -123,14 +129,21 @@ if [ "$PUBLISH" = 1 ]; then
         echo "**第一次打开**：右键（或按住 Control 点）→ 打开 → 再点「打开」。未做 Apple 公证，双击会被 Gatekeeper 拦，只需这一次。"
         echo "若弹「**已损坏，无法打开**」（浏览器下载常见，右键无效）：终端执行 \`sudo xattr -r -d com.apple.quarantine /Applications/jev-jarvis.app\` 后再打开。"
         echo "**第一次启动**：联网装依赖（uv 缓存命中就很快）；只需给 \`jev-jarvis\` 授予「屏幕录制」权限，然后退出重开，无需单独授权 \`python3.12\`。"
-        echo "**判断层默认跑本地模型，首次要下载约 7GB**（之后离线可用）。不想下这么大：在 \`~/.config/jev-jarvis/env\` 里给判断层配一个 key 走云端，见 README「配置」。"
+        echo "**判断层默认跑本地模型，首次要下载约 3.8 GB**（之后离线可用）。不想下载：在 \`~/.config/jev-jarvis/env\` 里给判断层配一个 key 走云端，见 README「配置」。"
         echo
         echo "### 本次包含"
-        PREV="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || true)"
-        if [ -n "$PREV" ]; then
-            git -C "$ROOT" log --pretty='- %s' "$PREV..HEAD" | head -20
+        if git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            # HEAD 就是刚推的 tag：describe 会返回 tag 自己，从它的父提交往回找上一版
+            PREV="$(git -C "$ROOT" describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
         else
-            git -C "$ROOT" log --pretty='- %s' | head -20
+            PREV="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || true)"
+        fi
+        if [ -n "$PREV" ]; then
+            # awk 而非 head：head 截断会让 git log 收到 SIGPIPE，pipefail+set -e 下
+            # 静默杀死整个脚本（退出 141）——v0.5.0 发布时实测死过两次
+            git -C "$ROOT" log --pretty='- %s' "$PREV..HEAD" | awk 'NR<=20'
+        else
+            git -C "$ROOT" log --pretty='- %s' | awk 'NR<=20'
         fi
     } > "$NOTES"
     RELEASE_ARGS=("$TAG" "$ZIP" "$STABLE" "$OUT/SHA256SUMS" --title "jev-jarvis $TAG" --notes-file "$NOTES" --latest)

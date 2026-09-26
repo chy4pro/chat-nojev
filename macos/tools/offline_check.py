@@ -398,7 +398,9 @@ def main() -> int:
     assert questions.RANK_QUESTION in spec
     assert spec in generate.PROMPT_ONE.format(
         message="m", context_line="", intent_line="", n=styles.PER_TONE, tone="t",
-        instruction="i", judgment_spec=spec)
+        instruction="i", judgment_spec=spec,
+        # 上游 v0.6.0 给 PROMPT_ONE 加了 {variation}（每话术候选数可配 1–5 带来的）
+        variation=generate._variation_instruction(styles.PER_TONE))
     print("  意图 8 项、风险 10 档、两道题干和排序那句都在提示词里，逐字来自 questions.py")
 
     print("\n全部通过。")

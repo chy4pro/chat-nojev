@@ -1,22 +1,23 @@
-"""Floating HUD: a non-activating panel beside WeChat showing intent, risk and ranked replies.
+"""Floating HUD: a non-activating panel beside the chat app showing intent, risk and ranked replies.
 
 Design notes
   * NSWindowStyleMaskNonactivatingPanel + floating level: the panel never steals focus
-    from WeChat, and window-ID capture means it never appears in our own screenshots.
+    from the chat app, and window-ID capture means it never appears in our own screenshots.
   * Poll loop: read the chat, hash the newest message, analyse only when it changes.
   * 判断和候选是同一次调用的产物（src/generate.py）：上游的判断层（本地 decider-2b /
     云端 TypeSafe Jev）和那次单独的排序调用都没了，意图、风险、具体行动和每条候选的分
     都跟着候选一起回来。所以这里也没有「预判」那条线了——消息一被看见就开跑的只剩
     generation 一条（latest-wins），停稳后直接把判断和候选一起上屏。流式那一路候选仍然
     边写边上屏（"排序中"），整条回完再带着分重画一次。
-  * The panel positions itself against WeChat's window each tick, so it follows moves,
+  * The panel positions itself against the chat app's window each tick, so it follows moves,
     resizes and monitor changes without any window-server hooks.
-  * The HUD uses native macOS vibrancy with semantic WeChat green/amber/red accents. The
+  * The HUD uses native macOS vibrancy with semantic green/amber/red accents. The
     Appearance stays pinned to Aqua so labels and controls keep the same tested contrast.
-  * 「填入」 writes through the Accessibility API into WeChat's input box (src/fill.py): no
-    synthetic keystrokes, no clipboard, and nothing needs to be frontmost. It needs the
-    Accessibility permission; when that is missing the HUD asks for it and reports the
-    failure.
+  * 「填入」 is dispatched through the per-app adapter layer (src/apps/) into the current
+    chat app's input box (OCR path: accessibility writes via src/fill.py; text path: AX value-set
+    with a keyboard-events fallback). No clipboard, and nothing is ever sent. It needs
+    the Accessibility permission; when that is missing the HUD asks for it and reports
+    the failure.
 """
 
 from __future__ import annotations
@@ -69,12 +70,16 @@ import userconfig  # noqa: E402
 userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inherit none)
 
 from perception import (  # noqa: E402
-    frontmost_app_is_wechat, read_conversation, screen_capture_ok,
-    request_screen_capture, warm_ocr)
+    find_wechat_window,
+    screen_capture_ok,
+    request_screen_capture,
+)
+from apps.registry import APPS, UNKNOWN, frontmost_app  # noqa: E402  按前台 App 分发（各支持平台）
 from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
 import ui_style  # noqa: E402
+import chat_context
 
 PANEL_W, PANEL_H = 360, 614   # tall enough for 3-line candidates + the chat name row
 COLLAPSED_H = 96              # height when the panel is rolled up
@@ -89,15 +94,15 @@ BURST_TICK = 0.45        # short cadence right after a change: catch the burst's
 BURST_READS = 3          # how many reads stay on BURST_TICK before falling back to SLOW_TICK
 SLOW_TICK = 1.0          # re-check cadence while the chat pane keeps moving
 READ_FAILURE_HIDE_S = 2.0  # do not flicker on a transient capture/window miss
+EMPTY_FRAME_REUSE_S = READ_FAILURE_HIDE_S  # #58: how long an empty-OCR streak may
+                                           # reuse the last read before giving up
 SETTLE_S = 1.2           # upper bound on the settle wait (anti-flood; unchanged by design)
 EARLY_SETTLE_S = 0.70    # the gate may open this early …
 STABLE_READS = 3         # … but only after this many consecutive unchanged reads
 MIN_GAP_S = 2.0          # never restart analysis faster than this
-CONTEXT_TURNS = 4        # recent turns the call sees (judgment + generation share it now)
-# 上游还有 JUDGE_TURNS=2：判断是单独一次前向，prompt 每次都要重付，所以只给两轮。
-# 现在判断和候选共用同一个 prompt，没有第二份上下文可省了——判断看到的是 CONTEXT_TURNS
-# 那 4 轮，比上游多两轮（对判断只会更好，代价是 0）。
-IDLE_STATUS = "等待微信消息…"       # the resting status line (also set at build time)
+IDLE_STATUS = "等待聊天应用消息…"   # the resting status line (also set at build time)
+# 上游这里还有 WARM_STATUS「判断模型加载中…」：本地 decider-2b 首次加载/下载要数分钟。
+# 没有本地模型可加载了，那一行连同 applyStatus_ / applyWarmDone_ / applyWarmFailed_ 一起没了。
 
 
 # Shared with the settings window so both surfaces keep one visual vocabulary.
@@ -134,7 +139,7 @@ LOG_PATH = Path.home() / "Library" / "Logs" / "jev-jarvis.log"
 # 上游的判断层自己会兜一道：judge_jev.JevJudge.judge() 查意图表（不在 8 个标签里就退
 # 「闲聊」）、把 confidence 和 risk 强转成 float（转不了就 0.0），所以面板可以直接
 # v["intent"]、v["confidence"]:.0% 地用。这一版的适配层只翻译不校验（见 src/generate.py
-# 的说明），坏值是原样递到这儿的——所以那道兜底搬到了用的地方，也就是下面这三个函数。
+# 的说明），坏值是原样递到这儿的——所以那道兜底搬到了用的地方，也就是下面这几个函数。
 # 结果是一样的：同一份坏值，面板不炸；区别只在坏值现在显示成「暂未判断」，而不是被判断层
 # 悄悄改成「闲聊」或者 0。
 #
@@ -253,10 +258,34 @@ class HudController(NSObject):
         self = objc.super(HudController, self).init()
         if self is None:
             return None
+        self._input_calibration = None
+        self._input_calibration_wid = None
+        self._input_calibration_saved = userconfig.get("JEV_INPUT_REGION")
+        self._calibration = None
+        self._calibration_wid = None
+        self._calibration_saved = userconfig.get("JEV_MESSAGE_REGION")
+        self._calibration_required = bool(self._calibration_saved)
+        self._calibrating = False
         self.last_seen = None          # newest message text observed
         self._reply_key = None         # (conversation, incoming text), never an outgoing message
         self._reply_epoch = 0          # invalidate even if the same text reappears later
         self._reply_worker = threading.local()
+        self._active_context = None
+        self._context_lock = threading.RLock()
+        self._context_version = 0
+        self.history_enabled = userconfig.get("JEV_HISTORY") == "1"
+        try:
+            self.context_limit = chat_context.message_limit(userconfig.get("JEV_CONTEXT_MESSAGES") or "20")
+        except ValueError:
+            self.context_limit = 20
+            _log("上下文条数配置无效，使用默认值 20")
+        self._observed_messages = None
+        self._observed_offset = 0
+        self.conversations = None
+        try:
+            self.conversations = chat_context.Conversations()
+        except (OSError, ValueError):
+            _log("本地会话数据读取失败，历史和背景暂不可用")
         self.last_change_ts = 0.0      # when it last changed (burst detection)
         self.last_analyze_ts = 0.0     # rate limit for analysis starts
         self.analyzed_text = None      # what the panel currently shows
@@ -273,13 +302,18 @@ class HudController(NSObject):
         self._dd_boxes: list = []       # the flat fields the dropdowns are drawn into
         self._group_boxes: list = []    # translucent surfaces behind active tone groups
         self._rows: list = []
+        self._appearance_surfaces = []
+        self._appearance_buttons = []
+        self._message_expanded = False
+        self._message_text = ""
+        self._layout_key = None
         self._fixed: list = []          # (control, x, dy_from_top, w, h) — the rows above
         self._detail_views: list = []   # non-data chrome hidden with the expanded details
         self._risk_dots: list = []      # low / medium / high indicators, presentation only
         self._group_top = 0             # where the first group starts, from the top
         self._title_h = 28              # measured right after the panel is built
         self.cand_texts: list[str | None] = [None] * (styles.MAX_SLOTS * styles.PER_TONE)
-        self._last_intent = ""          # kept so a tone change can re-rank without re-judging
+        self._last_intent = ""          # kept so the overlay can badge the judged message
         # streaming candidates: each generation run bumps this epoch at its start and its
         # streamed lines carry the value, so a late line from a run a tone change or a new
         # message superseded is dropped instead of written into the new run's rows
@@ -291,6 +325,7 @@ class HudController(NSObject):
         self._fingerprint = None    # last chat-pane fingerprint; equal ⇒ skip OCR entirely
         self._last_full = None      # last OCR'd result, reused while the pane is unchanged
         self._analyzing = False     # the analysis runs off the tick path
+        self._regenerating = False  # explicit candidate refresh; does not re-read/judge
         # Early run: the one call starts the moment a message is seen, latest-wins. It
         # carries the judgment too, so the settle window (~1 s) hides the whole latency and
         # nothing is left to compute after the gate opens.
@@ -309,6 +344,7 @@ class HudController(NSObject):
         self._collapsed = False
         self._expanded_h = None       # full height, captured the first time we collapse
         self._paused = False
+        self._always_on_top = True     # menu-bar switch; preserve the historical default
         # YOLO overlay default: JEV_BOXES=1 (or true/yes/on) in the env file starts it on;
         # either way the menu-bar item flips it at runtime
         self._show_boxes = userconfig.get("JEV_BOXES").strip().lower() in (
@@ -316,11 +352,14 @@ class HudController(NSObject):
         self._last_risk = None        # newest verdict's risk, for the overlay's highlight
         self._chat_title = ""
         self._asked_permission = False
-        self._win_wid = None          # sticky WeChat window id
-        self._wechat_frontmost = None # foreground boundary; False means capture state is stale
+        self._win_wid = None          # sticky chat window id (per app)
+        self._app = None              # 当前前台聊天应用适配器；None = 不在任何聊天应用前台
+        self._asked_accessibility = False   # 文本接口路径的辅助功能授权只弹一次
         self._foreground_epoch = 0    # catches leave+return while one capture is in flight
         self._read_fail_since = None  # debounce transient foreground capture failures
         self._read_fail_hidden = False
+        self._empty_frame_since = None  # empty-OCR streak start (#58): reuse the last
+                                        # read, give up after EMPTY_FRAME_REUSE_S
         self._last_origin = None      # last applied panel origin
         self._pending_origin = None   # candidate origin awaiting confirmation
         self._build_panel()
@@ -337,7 +376,8 @@ class HudController(NSObject):
                  | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskNonactivatingPanel)
         self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, PANEL_W, PANEL_H), style, NSBackingStoreBuffered, False)
-        self.panel.setLevel_(AppKit.NSFloatingWindowLevel)
+        self.panel.setLevel_(AppKit.NSFloatingWindowLevel if self._always_on_top
+                             else AppKit.NSNormalWindowLevel)
         self.panel.setOpaque_(False)
         self.panel.setAlphaValue_(1.0)
         self.panel.setHasShadow_(True)
@@ -361,6 +401,12 @@ class HudController(NSObject):
         view.setState_(AppKit.NSVisualEffectStateActive)
         view.setWantsLayer_(True)
         view.layer().setBackgroundColor_(PALETTE["bg"].CGColor())
+        # A tint subview sits above the system material. Setting the effect view's
+        # backing-layer color alone can be covered by macOS's accessibility fallback.
+        self._solid_backdrop = ui_style.make_surface(0, NSColor.clearColor())
+        self._solid_backdrop.setFrame_(view.bounds())
+        self._solid_backdrop.setAutoresizingMask_(AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable)
+        view.addSubview_(self._solid_backdrop)
         self.rows: dict[str, NSTextField] = {}
 
         # The latest master adds model settings to this same header. Keep it as a quiet,
@@ -385,12 +431,31 @@ class HudController(NSObject):
         view.addSubview_(self.settings_button)
         self._fixed.append((self.settings_button, PANEL_W - 44, 4, 32, 32))
 
+        self.calibration_button = self._make_button(PANEL_W - 80, 0, 32, 32,
+                                                    "", "calibrateMessages:", 0)
+        icon = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "viewfinder", "校准消息区和输入区")
+        self.calibration_button.setImage_(icon.imageWithSymbolConfiguration_(symbol_config))
+        self.calibration_button.setImagePosition_(AppKit.NSImageOnly)
+        self.calibration_button.setImageScaling_(AppKit.NSImageScaleNone)
+        self.calibration_button.setBordered_(False)
+        self.calibration_button.setContentTintColor_(PALETTE["muted"])
+        self.calibration_button.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
+        self.calibration_button.layer().setBorderWidth_(0.0)
+        self.calibration_button.setToolTip_("校准消息区和输入区")
+        self.calibration_button.setAccessibilityLabel_("校准消息区和输入区")
+        self.calibration_button.setHidden_(False)
+        view.addSubview_(self.calibration_button)
+        self._fixed.append((self.calibration_button, PANEL_W - 80, 4, 32, 32))
+
         # Decorative surfaces are fixed; every string still comes from the existing rows.
         for surface, x, top, w, h in (
             (self._make_surface(12, PALETTE["surface"]), 14, 54, PANEL_W - 28, 62),
             (self._make_surface(12, PALETTE["surface"]), 14, 124, PANEL_W - 28, 72),
             (self._make_surface(10, PALETTE["surface"]), 14, 204, PANEL_W - 28, 34),
         ):
+            if top == 54:
+                self._message_surface = surface
             view.addSubview_(surface)
             self._fixed.append((surface, x, top, w, h))
             self._detail_views.append(surface)
@@ -431,10 +496,10 @@ class HudController(NSObject):
             self._detail_views.append(label)
 
         for key, x, top, w, h, size, color, bold in (
-            ("chat", 20, 14, PANEL_W - 76, 20, 15, PALETTE["accent"], True),
+            ("chat", 20, 14, PANEL_W - 112, 20, 15, PALETTE["accent"], True),
             ("status", 20, 36, PANEL_W - 40, 14, 10, PALETTE["muted"], False),
-            ("message", 26, 62, PANEL_W - 52, 30, 14, PALETTE["text"], False),
-            ("sender", 26, 96, PANEL_W - 52, 14, 10, PALETTE["muted"], False),
+            ("message", 22, 82, PANEL_W - 44, 38, 14, PALETTE["text"], False),
+            ("sender", 22, 62, PANEL_W - 112, 14, 10, PALETTE["muted"], False),
             ("intent", 26, 136, 116, 26, 20, PALETTE["text"], True),
             ("confidence", 26, 166, 116, 16, 11, PALETTE["muted"], False),
             ("risk", 164, 137, 92, 24, 14, PALETTE["green"], True),
@@ -443,11 +508,34 @@ class HudController(NSObject):
             tf = self._make_label(x, 0, w, h, size=size, color=color, bold=bold)
             if key in {"message", "actions"}:
                 tf.cell().setWraps_(True)
-            view.addSubview_(tf)
             self.rows[key] = tf
-            self._fixed.append((tf, x, top, w, h))
+            if key == "message":
+                tf.cell().setScrollable_(False)
+                tf.cell().setUsesSingleLineMode_(False)
+                tf.cell().setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+                tf.setMaximumNumberOfLines_(2)
+                scroll = AppKit.NSScrollView.alloc().initWithFrame_(NSMakeRect(x, 0, w, h))
+                scroll.setDrawsBackground_(False)
+                scroll.setHasVerticalScroller_(False)
+                scroll.setAutohidesScrollers_(True)
+                scroll.setScrollerStyle_(AppKit.NSScrollerStyleOverlay)
+                scroll.setDocumentView_(tf)
+                self._message_scroll = scroll
+                view.addSubview_(scroll)
+                self._fixed.append((scroll, x, top, w, h))
+                self._detail_views.append(scroll)
+            else:
+                view.addSubview_(tf)
+                self._fixed.append((tf, x, top, w, h))
             if key not in {"chat", "status"}:
                 self._detail_views.append(tf)
+
+        self._message_toggle = self._make_button(PANEL_W - 82, 0, 60, 18,
+                                                  "展开 ▾", "toggleMessage:", 0)
+        self._message_toggle.setAccessibilityLabel_("展开或收起完整消息")
+        view.addSubview_(self._message_toggle)
+        self._fixed.append((self._message_toggle, PANEL_W - 82, 60, 60, 18))
+        self._detail_views.append(self._message_toggle)
 
         header = self._make_label(18, 0, PANEL_W - 36, 18,
                                   size=12, color=PALETTE["text"], bold=True)
@@ -518,24 +606,43 @@ class HudController(NSObject):
                                   "track": track, "fill": fill_bar})
             self._rows.append(slot_rows)
 
+        self.reanalyze_button = self._make_button(
+            14, 0, 96, 28, "立刻分析", "reanalyze:", 0)
+        self.reanalyze_button.setAccessibilityLabel_("立刻分析")
+        self.reanalyze_button.setToolTip_("重新读取聊天窗口并执行完整分析")
+        view.addSubview_(self.reanalyze_button)
+        self._detail_views.append(self.reanalyze_button)
+
+        self.regenerate_button = self._make_button(
+            118, 0, PANEL_W - 132, 28, "重新生成推荐回答", "regenerateReply:", 0)
+        self.regenerate_button.setAccessibilityLabel_("重新生成推荐回答")
+        self.regenerate_button.setToolTip_("沿用当前消息和判断结果，只重新生成候选回答")
+        view.addSubview_(self.regenerate_button)
+        self._detail_views.append(self.regenerate_button)
+
         self.panel.setContentView_(view)
         self._title_h = self.panel.frame().size.height - PANEL_H   # measured, not assumed
         self._relayout()
         self.rows["status"].setStringValue_(IDLE_STATUS)
         self._wire_window_controls()
         self._install_status_item()
+        AppKit.NSWorkspace.sharedWorkspace().notificationCenter().addObserver_selector_name_object_(
+            self, "accessibilityDisplayChanged:",
+            AppKit.NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, None)
+        self.applyAccessibilityAppearance_(None)
 
     @objc.python_method
     def _build_overlay(self):
-        """A transparent, click-through window aligned to WeChat: the YOLO-style view.
+        """A transparent, click-through window aligned to the chat app: the YOLO-style view.
 
         Pure visualization of what perception already returns — every message's bounding
         box and its real OCR confidence, the judged one carrying intent+risk on its chip.
         Three properties keep it safe: it is OFF by default (menu-bar toggle); clicks pass
-        through (`ignoresMouseEvents`), so WeChat never gets blocked; and perception
+        through (`ignoresMouseEvents`), so the chat app never gets blocked; and perception
         captures by window ID, so this window can never pollute our own OCR.
-        Coordinate mapping assumes the 1x nominal capture's pixel size equals the window's
-        point size — that is exactly what kCGWindowImageNominalResolution promises.
+        Coordinate mapping is pure normalized geometry × window point size, so it is
+        independent of the capture's pixel resolution (the old 1x-nominal assumption went
+        away with #83's subprocess capture).
         """
         self._ov_panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, 200, 200), NSWindowStyleMaskBorderless,
@@ -543,7 +650,7 @@ class HudController(NSObject):
         self._ov_panel.setLevel_(AppKit.NSFloatingWindowLevel)
         self._ov_panel.setOpaque_(False)
         self._ov_panel.setHasShadow_(False)
-        self._ov_panel.setIgnoresMouseEvents_(True)   # never steal a click meant for WeChat
+        self._ov_panel.setIgnoresMouseEvents_(True)   # never steal a click meant for the chat app
         self._ov_panel.setHidesOnDeactivate_(False)
         self._ov_panel.setBackgroundColor_(NSColor.clearColor())
         view = _BoxesView.alloc().init()
@@ -564,7 +671,15 @@ class HudController(NSObject):
         neither a dropdown's worth of rows nor its candidates, which is what removes the dead
         space a fixed-height panel left in the middle.
         """
-        dy = self._group_top
+        message_h, document_h, overflow = self._message_metrics()
+        message_delta = message_h - 26  # sender row now precedes the body
+        self._message_toggle.setHidden_(not overflow)
+        self._message_toggle.setTitle_("收起 ▴" if self._message_expanded else "展开 ▾")
+        self._message_scroll.setHasVerticalScroller_(document_h > message_h)
+        field = self.rows["message"]
+        field.setMaximumNumberOfLines_(0 if self._message_expanded else 2)
+        field.setFrame_(NSMakeRect(0, 0, PANEL_W - 44, document_h))
+        dy = self._group_top + message_delta
         placements = []          # (control, x, dy_from_top, w, h)
         for slot in range(styles.MAX_SLOTS):
             active = self._slot_active(slot)
@@ -613,14 +728,28 @@ class HudController(NSObject):
             if slot < styles.MAX_SLOTS - 1:
                 dy += GROUP_GAP
 
-        content_h = dy + BOTTOM_PAD
+        # no setHidden_(False) here: the collapsed panel keeps _detail_views hidden, and
+        # _render_groups() reaches this method without a collapsed guard
+        placements.append((self.reanalyze_button, 14, dy, 96, 28))
+        placements.append((self.regenerate_button, 118, dy, PANEL_W - 132, 28))
+        dy += 28 + BOTTOM_PAD
+        content_h = dy
         view = self.panel.contentView()
         view.setFrameSize_(NSMakeSize(PANEL_W, content_h))
-        for ctrl, x, top, w, h in placements + self._fixed:
+        fixed = []
+        for ctrl, x, top, w, h in self._fixed:
+            if ctrl is self._message_surface:
+                h += message_delta
+            elif ctrl is self._message_scroll:
+                h = message_h
+            elif top >= 124:
+                top += message_delta
+            fixed.append((ctrl, x, top, w, h))
+        for ctrl, x, top, w, h in placements + fixed:
             ctrl.setFrame_(NSMakeRect(x, content_h - top - h, w, h))
 
         # resize the window with its TOP edge pinned: growing downwards is what the eye
-        # expects here, and _position_near() anchors the panel to WeChat's top anyway
+        # expects here, and _position_near() anchors the panel to the chat app's top anyway
         f = self.panel.frame()
         top = f.origin.y + f.size.height
         frame_h = content_h + self._title_h
@@ -657,15 +786,18 @@ class HudController(NSObject):
         bar = AppKit.NSStatusBar.systemStatusBar()
         self.status_item = bar.statusItemWithLength_(AppKit.NSVariableStatusItemLength)
         self.status_item.button().setTitle_("J")
-        self.status_item.button().setToolTip_("jev-jarvis · 微信意图助手")
+        self.status_item.button().setToolTip_("jev-jarvis · 聊天意图助手")
 
         menu = AppKit.NSMenu.alloc().init()
         for title, action, key in (
             ("显示 / 收起面板", "collapsePanel:", ""),
             ("暂停读屏", "togglePause:", ""),
             ("YOLO 检测框", "toggleBoxes:", ""),
+            ("固定在最前面", "toggleAlwaysOnTop:", ""),
             ("立即重新分析", "reanalyze:", ""),
             ("模型设置…", "openSettings:", ","),
+            ("校准区域…", "calibrateMessages:", ""),
+            ("恢复自动识别区域", "clearCalibration:", ""),
         ):
             menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
         menu.addItem_(AppKit.NSMenuItem.separatorItem())
@@ -674,9 +806,81 @@ class HudController(NSObject):
             item.setTarget_(self)
         self.pause_item = menu.itemArray()[1]
         self.boxes_item = menu.itemArray()[2]
+        self.always_on_top_item = menu.itemArray()[3]
         self.boxes_item.setState_(
             AppKit.NSOnState if self._show_boxes else AppKit.NSOffState)
+        self.always_on_top_item.setState_(
+            AppKit.NSOnState if self._always_on_top else AppKit.NSOffState)
         self.status_item.setMenu_(menu)
+
+    @objc.python_method
+    def _retire_calibration_results(self):
+        self._foreground_epoch += 1
+        self._reply_epoch += 1
+        self._gen_epoch += 1
+        self._reply_key = None
+        self.last_seen = self.analyzed_text = None
+        self._pregen_req = self._pregen_result = None
+        self._fingerprint = self._last_full = self._layout_key = None
+        self._empty_frame_since = None
+        self._input_target = self._input_window = None
+        self._stable_n = 0
+        self._next_read_ts = 0
+
+    def calibrateMessages_(self, sender):
+        if self._calibrating:
+            self.calibration_controller.window.makeKeyAndOrderFront_(None)
+            return
+        from calibration_ui import CalibrationController
+        self._calibrating = True
+        self._retire_calibration_results()
+        self.applyWaiting_("正在校准消息区和输入区…")
+        self.panel.orderOut_(None)
+        self._ov_panel.orderOut_(None)
+        try:
+            self.calibration_controller = CalibrationController.alloc().init().build(
+                self._calibration_finished, self._calibration_saved,
+                saved_input=self._input_calibration_saved)
+        except (ValueError,OSError) as e:
+            self._calibrating = False
+            self._show()
+            self._render("status", str(e), PALETTE["red"])
+
+    @objc.python_method
+    def _calibration_finished(self, calibration, wid):
+        if calibration is not None:
+            message, editor = calibration
+            self._input_calibration = editor
+            self._input_calibration_wid = wid
+            self._input_calibration_saved = editor.serialize()
+            self._calibration = message
+            self._calibration_wid = wid
+            self._calibration_saved = message.serialize()
+            self._calibration_required = True
+        self._calibrating = False
+        self._retire_calibration_results()
+        self._show()
+        self.applyWaiting_("校准完成；请回到聊天窗口。调整分栏后请重新校准。"
+                           if calibration else "已取消本次校准")
+
+    def clearCalibration_(self, sender):
+        if self._calibrating: return
+        from settings_config import read_document, write_settings
+        path = userconfig.env_files()[0]
+        try:
+            write_settings(path,read_document(path),{"JEV_MESSAGE_REGION":"", "JEV_INPUT_REGION":""})
+        except (ValueError,OSError) as e:
+            self._render("status",str(e),PALETTE["red"])
+            return
+        self._calibration = None
+        self._calibration_wid = None
+        self._input_calibration = None
+        self._input_calibration_wid = None
+        self._input_calibration_saved = ""
+        self._calibration_saved = ""
+        self._calibration_required = False
+        self._retire_calibration_results()
+        self.applyWaiting_("已恢复自动识别区域")
 
     def openSettings_(self, sender):
         from settings import SettingsController
@@ -684,7 +888,7 @@ class HudController(NSObject):
             self.settings_controller.show()
             return
         try:
-            self.settings_controller = SettingsController.alloc().init().build()
+            self.settings_controller = SettingsController.alloc().init().build(self)
             self.settings_controller.show()
         except OSError:
             alert = AppKit.NSAlert.alloc().init()
@@ -694,7 +898,46 @@ class HudController(NSObject):
     @objc.python_method
     def _make_surface(self, radius: float, color: NSColor,
                       border: NSColor | None = None) -> NSView:
-        return ui_style.make_surface(radius, color, border)
+        surface = ui_style.make_surface(radius, color, border)
+        self._appearance_surfaces.append((surface, radius, color, border))
+        return surface
+
+    def accessibilityDisplayChanged_(self, notification):
+        # Workspace notifications are independent of the polling/model workers.
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "applyAccessibilityAppearance:", None, False)
+
+    def applyAccessibilityAppearance_(self, notification):
+        reduced = AppKit.NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
+        self._apply_accessibility_palette(bool(reduced))
+
+    @objc.python_method
+    def _apply_accessibility_palette(self, reduced):
+        def adapted(color):
+            if color is None or not reduced:
+                return color
+            for key, replacement in ui_style.SOLID_PALETTE.items():
+                if color.isEqual_(PALETTE[key]):
+                    return replacement
+            return color  # risk/status colors retain their semantic meaning
+
+        background = ui_style.SOLID_PALETTE["bg"] if reduced else NSColor.clearColor()
+        self._solid_backdrop.layer().setBackgroundColor_(background.CGColor())
+        for surface, radius, color, original_border in self._appearance_surfaces:
+            layer = surface.layer()
+            layer.setBackgroundColor_(adapted(color).CGColor())
+            border = adapted(original_border)
+            if reduced and color.isEqual_(PALETTE["surface"]):
+                border = ui_style.SOLID_PALETTE["edge"]
+            layer.setBorderWidth_(0.75 if border is not None else 0)
+            if border is not None:
+                layer.setBorderColor_(border.CGColor())
+        for button in self._appearance_buttons:
+            if button is self.settings_button or button is self.calibration_button:
+                continue  # the gear stays an unboxed icon
+            button.layer().setBackgroundColor_(adapted(PALETTE["row"]).CGColor())
+            button.layer().setBorderColor_(adapted(PALETTE["edge"]).CGColor())
+        self.panel.contentView().setNeedsDisplay_(True)
 
     @objc.python_method
     def _make_label(self, x, y, w, h, size=13, color=None, bold=False):
@@ -710,6 +953,7 @@ class HudController(NSObject):
         btn.setAction_(action)
         btn.setTag_(tag)
         btn.setHidden_(True)
+        self._appearance_buttons.append(btn)
         return btn
 
     @objc.python_method
@@ -728,10 +972,43 @@ class HudController(NSObject):
 
     @objc.python_method
     def _render(self, key: str, text: str, color: NSColor | None = None):
+        # 上游这里还要让位给判断模型的加载/下载进度（self.judge.load_status，配一个
+        # _normal_status 记住被盖住的那行）。没有本地模型可加载，状态行就只有这一个来源。
         tf = self.rows[key]
+        if key == "message" and text != self._message_text:
+            self._message_expanded = False
+            self._message_text = text
         tf.setStringValue_(text)
+        if key == "message" and not self._collapsed:
+            self._relayout()
+            tf.scrollRectToVisible_(NSMakeRect(0, max(0, tf.frame().size.height - 1), 1, 1))
         if color is not None:
             tf.setTextColor_(color)
+
+    @objc.python_method
+    def _message_metrics(self):
+        field = self.rows["message"]
+        attributed = NSAttributedString.alloc().initWithString_attributes_(
+            field.stringValue() or " ", {NSFontAttributeName: field.font()})
+        bounds = attributed.boundingRectWithSize_options_(
+            NSMakeSize(PANEL_W - 50, 100000),
+            AppKit.NSStringDrawingUsesLineFragmentOrigin | AppKit.NSStringDrawingUsesFontLeading)
+        two_lines = NSAttributedString.alloc().initWithString_attributes_(
+            "国\n国", {NSFontAttributeName: field.font()})
+        two_bounds = two_lines.boundingRectWithSize_options_(
+            NSMakeSize(PANEL_W - 50, 100000),
+            AppKit.NSStringDrawingUsesLineFragmentOrigin | AppKit.NSStringDrawingUsesFontLeading)
+        collapsed = float(int(two_bounds.size.height + 5.999))
+        full = max(collapsed, float(int(bounds.size.height + 5.999)))
+        overflow = full > collapsed
+        document = full if self._message_expanded else collapsed
+        return min(180, document), document, overflow
+
+    def toggleMessage_(self, sender):
+        self._message_expanded = not self._message_expanded
+        self._relayout()
+        field = self.rows["message"]
+        field.scrollRectToVisible_(NSMakeRect(0, max(0, field.frame().size.height - 1), 1, 1))
 
     @objc.python_method
     def _set_candidate_header(self, text: str):
@@ -884,7 +1161,7 @@ class HudController(NSObject):
 
     @objc.python_method
     def _position_near(self, win: dict | None):
-        """Dock the panel beside WeChat, on the screen WeChat is actually on.
+        """Dock the panel beside the chat app, on the screen it is actually on.
 
         Uses global Cocoa coordinates throughout. NSScreen.mainScreen() must NOT be used:
         it follows whichever display holds the key window, so relying on it made the panel
@@ -908,7 +1185,7 @@ class HudController(NSObject):
                          and s.frame().origin.y <= cyan <= s.frame().origin.y + s.frame().size.height),
                         primary)
             sf = host.frame()
-            # dock right of WeChat if it fits on that screen, else left, else its right edge
+            # dock right of the chat app if it fits on that screen, else left, else its right edge
             x = wx + ww + 8
             if x + panel_w > sf.origin.x + sf.size.width:
                 x = wx - panel_w - 8
@@ -921,7 +1198,7 @@ class HudController(NSObject):
             x = sf.size.width - panel_w - 12
             y = sf.size.height - panel_h - 60
 
-        # dead-band: ignore sub-2pt corrections and one-off blips, so WeChat's own window
+        # dead-band: ignore sub-2pt corrections and one-off blips, so the app's own window
         # animations (and our own numeric noise) stop nudging the panel around
         target = (round(x), round(y))
         last = self._last_origin
@@ -949,15 +1226,23 @@ class HudController(NSObject):
         self._render("status", "已复制", PALETTE["green"])
 
     def fillCandidate_(self, sender):
-        """Write the candidate into WeChat's input box (src/fill.py)."""
+        """Write the candidate into the current chat app's input box (via self._app)."""
+        if getattr(self,"_calibration_required",False) and self._input_calibration is None:
+            self._render("status", "请点击右上角校准图标，确认消息区和输入区。", PALETTE["amber"])
+            return
         idx = sender.tag()
         text = self.cand_texts[idx] if 0 <= idx < len(self.cand_texts) else None
         if not text:
             return
-        # The status line is painted before the call because writing into WeChat takes a
-        # beat; the click should look instant even though the write has not happened yet.
+        # The status line is painted before the call because writing into the chat app
+        # takes a beat; the click should look instant even though the write has not
+        # happened yet.
         self._render("status", "填入中…", PALETTE["muted"])
         self.panel.displayIfNeeded()
+        app = self._app
+        if app is None:
+            self._render("status", "填入失败：聊天应用不在前台", PALETTE["red"])
+            return
         if not fill.has_accessibility():
             # First click is the moment to ask: the system dialog is the only way in.
             fill.request_accessibility()
@@ -965,7 +1250,12 @@ class HudController(NSObject):
         if target is None or (target["box"] is None and not target.get("visual_rect")):
             self._render("status", "填入失败：" + (target["reason"] if target else "等待输入框定位"), PALETTE["red"])
             return
-        ok, reason = fill.fill_text(text, target=target)
+        if target.get("app") != app.key:
+            # 适配器刚切换、检测框还没更新：目标矩形仍属于上一个 App，写进去会
+            # 填错应用——拒绝并让下一轮 locate_input 刷新目标。
+            self._render("status", "填入失败：输入目标属于另一应用，请等检测框更新后重试", PALETTE["red"])
+            return
+        ok, reason = app.fill_text(text, target=target)
         if ok:
             self._render("status", reason, PALETTE["green"])
         else:
@@ -977,6 +1267,11 @@ class HudController(NSObject):
         if picked == self.slot_tones:
             return
         self.slot_tones = picked
+        self._reply_epoch += 1
+        self._gen_epoch += 1
+        self._pregen_req = self._pregen_result = None
+        if not self.analyzed_text:
+            self.last_seen = None
         # the panel is sized by how many slots are in use, so re-lay-out *before* the new
         # candidates arrive: the empty rows appear at once and nothing jumps later
         self._clear_candidates()
@@ -1031,7 +1326,7 @@ class HudController(NSObject):
         这一版的分是写候选那次调用自己给的，已经在 gen["scores"] 里了，所以这里只剩「按分
         重排」这一件事——排法、缺分算 0、排完的形状都跟上游一模一样。
         口径变了一处：上游那一道题看得见所有话术的候选，分跨话术可比；现在每次调用只看得见
-        自己写的两条，分是话术内的。组内先后不受影响，只有显示的百分比不再是同一把尺子。
+        自己写的那几条，分是话术内的。组内先后不受影响，只有显示的百分比不再是同一把尺子。
 
         分是模型自己报的，不保证是数：不是数的排到最后（sort 不能拿字符串比大小），
         显示那一步再兜一次（_render_groups）。丢是不丢的——适配层原样递上来的值一直在。
@@ -1053,7 +1348,7 @@ class HudController(NSObject):
     def _stream_hook(self, t0: float, label: str = ""):
         """The on_candidate callback for the generation run starting now.
 
-        Shared by all three run starters (_analyze, _run_generation, _regen_work) so the
+        Shared by every run starter (_analyze, _regen_work, …) so the
         streaming lines follow one epoch/rows discipline no matter which path produced
         them. The callback runs on the run's worker thread; it hops to the main thread for
         every UI touch, and the first line it sees logs the latency that streaming is here
@@ -1079,16 +1374,18 @@ class HudController(NSObject):
         try:
             if not self._reply_current():
                 return
+            context = getattr(self._reply_worker, "context", self._active_context)
             # intent="" —— 判断不参与起草（上游线上调用点也一直传空），这次带回来的判断扔掉
-            gen = self.generator.generate(text, "", slot_tones, None,
+            gen = self.generator.generate(chat_context.model_message(text, context), "", slot_tones,
+                                          context,
                                           self._stream_hook(t0, "换话术"))
             groups = gen.get("groups") or []
-            failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
+            failed = [str(g["slot"]) for g in groups if g.get("error")]
             _log(f"换话术 生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms · {len(groups)} 个话术"
                  + (f" · 失败: {'; '.join(failed)}" if failed else ""))
             payload = self._payload_from_gen(gen)
             if payload is None:
-                err = (gen.get("error") or "空结果")[:60]
+                err = "服务未返回可用候选，请检查模型设置"
                 _log(f"换话术无可用候选: {err}")
                 self._push("applyError:", f"候选生成失败: {err}")
                 return
@@ -1098,8 +1395,37 @@ class HudController(NSObject):
             _log(f"换话术 端到端 {(time.perf_counter() - t0) * 1000:.0f}ms")
             self._push("applyTones:", ranked)
         except Exception as e:
-            _log(f"换话术失败 {type(e).__name__}: {str(e)[:60]}")
-            self._push("applyError:", f"换话术失败: {type(e).__name__}: {str(e)[:40]}")
+            _log(f"换话术失败 {type(e).__name__}")
+            self._push("applyError:", f"换话术失败: {type(e).__name__}")
+
+    @objc.python_method
+    def _regenerate_work(self, text: str, slot_tones: list[str]):
+        """Refresh candidate replies atomically, without re-reading or re-judging.
+
+        判断跟着这次调用也会回来一份，同样扔掉：按「重新生成推荐回答」只换候选，
+        面板上的意图/风险还是这条消息那次分析的结论（跟上游这个按钮的行为一致）。
+        """
+        t0 = time.perf_counter()
+        try:
+            if not self._reply_current():
+                return
+            context = getattr(self._reply_worker, "context", self._active_context)
+            gen = self.generator.generate(chat_context.model_message(text, context), "", slot_tones, context)
+            payload = self._payload_from_gen(gen)
+            if payload is None:
+                err = "服务未返回可用候选，请检查模型设置"
+                _log(f"重新生成无可用候选: {err}")
+                self._push("applyError:", f"重新生成失败: {err}")
+                return
+            ranked = self._rank_payload(payload, gen.get("scores") or {})
+            _log(f"重新生成推荐回答 {(time.perf_counter() - t0) * 1000:.0f}ms · "
+                 f"{sum(len(items) for _s, _t, items in ranked)} 条候选")
+            self._push("applyRegenerated:", ranked)
+        except Exception as e:
+            _log(f"重新生成失败 {type(e).__name__}")
+            self._push("applyError:", f"重新生成失败: {type(e).__name__}")
+        finally:
+            self._regenerating = False
 
     @objc.python_method
     def _payload_current(self, payload) -> bool:
@@ -1124,7 +1450,48 @@ class HudController(NSObject):
         self._render("status", f"已换话术 · {total} 条", PALETTE["muted"])
         self._render_groups(payload)
 
+    def applyRegenerated_(self, payload):
+        if not self._payload_current(payload):
+            return
+        self._set_candidate_header(self._cand_header(payload))
+        total = sum(len(items) for _s, _t, items in payload)
+        self._render_groups(payload)
+        self._render("status", f"已重新生成 · {total} 条", PALETTE["muted"])
+
     # ------------------------------------------------------------ controls
+    def regenerateReply_(self, sender):
+        """Regenerate candidates for the current message without re-reading or judging."""
+        if self._paused:
+            self._render("status", "已暂停 · 请先继续读屏", PALETTE["amber"])
+            return
+        if self._app is None:
+            # The panel floats over every app: clicked from elsewhere this run would be
+            # discarded by _reply_current() with no status update to say so — ask here.
+            self._render("status", "聊天应用不在前台 · 回到聊天窗口再试", PALETTE["amber"])
+            return
+        if self._regenerating:
+            self._render("status", "推荐回答生成中…", PALETTE["muted"])
+            return
+        text = self.analyzed_text
+        messages = (self._last_full or {}).get("messages") or []
+        newest = next((m for m in reversed(messages)
+                       if m.side == "them" and m.text == text), None)
+        active = [tone for tone in self.slot_tones if tone in styles.PRESETS]
+        if not text or newest is None or self._reply_key is None:
+            self._render("status", "当前没有可重新生成的推荐回答", PALETTE["amber"])
+            return
+        if not active:
+            self._render("status", "没选话术 · 至少选一个", PALETTE["amber"])
+            return
+        self._regenerating = True
+        self._set_candidate_header("候选回复 · 重新生成中…")
+        self._render("status", "重新生成推荐回答…", PALETTE["muted"])
+        _log("重新生成推荐回答 · 已请求")
+        threading.Thread(target=self._reply_task,
+                         args=(self._reply_epoch, self._regenerate_work,
+                               text, list(self.slot_tones)),
+                         daemon=True).start()
+
     def collapsePanel_(self, sender):
         self._set_collapsed(not self._collapsed)
 
@@ -1153,12 +1520,35 @@ class HudController(NSObject):
             self.analyzed_text = None
             self._render("status", "已恢复 · 读屏中", PALETTE["muted"])
 
+    def toggleAlwaysOnTop_(self, sender):
+        """Toggle only the HUD's window level; the menu action takes effect immediately."""
+        self._always_on_top = not self._always_on_top
+        self.panel.setLevel_(AppKit.NSFloatingWindowLevel if self._always_on_top
+                             else AppKit.NSNormalWindowLevel)
+        self.always_on_top_item.setState_(
+            AppKit.NSOnState if self._always_on_top else AppKit.NSOffState)
+        if self._always_on_top:
+            # Raise the already-visible panel without making it key or stealing chat focus.
+            self.panel.orderFrontRegardless()
+
     def reanalyze_(self, sender):
+        if self._paused:
+            self._render("status", "已暂停 · 请先继续读屏", PALETTE["amber"])
+            return
+        self._reply_epoch += 1
+        self._gen_epoch += 1
         self._pregen_req = None        # "re-analyze" means re-run, not reuse the early run
         self._pregen_result = None
         self.last_seen = None
         self.analyzed_text = None
+        self._stream_rows = {}
+        self._fingerprint = None
+        self._stable_n = 0
+        self._next_read_ts = 0
         self._render("status", "重新分析中…", PALETTE["muted"])
+        if not self._paused and not self._busy:
+            self._busy = True
+            threading.Thread(target=self._work, daemon=True).start()
 
     def quitApp_(self, sender):
         AppKit.NSApplication.sharedApplication().terminate_(None)
@@ -1198,13 +1588,20 @@ class HudController(NSObject):
         self._last_origin = None      # let the next tick re-dock cleanly
 
     # --------------------------------------------------------------- loop
-    @objc.python_method
-    def _set_foreground_state(self, frontmost):
-        """Apply one hard lifecycle boundary when WeChat gains/loses focus."""
-        if frontmost is None or frontmost is self._wechat_frontmost:
+    # 上游这里还有 _refresh_model_status：每跳把判断模型的加载/下载进度重画到状态行上
+    # （tick_ 在所有门之前先调它，好让下载进度在读屏排队时也看得见）。没有本地模型，
+    # 没有进度可报——整段和 tick_ 里那一行调用一起删了。
+    def _set_foreground_state(self, app):
+        """Apply one hard lifecycle boundary when a chat app gains/loses focus or changes.
+
+        `app` is an adapter, None (some other app is frontmost — a real leave), or UNKNOWN
+        (the query failed — not evidence of anything, so nothing changes).
+        """
+        if app is UNKNOWN or app is self._app:
             return False
 
-        self._wechat_frontmost = frontmost
+        prev = self._app
+        self._app = app
         self._foreground_epoch += 1
         self._reply_epoch += 1
         self._reply_key = None
@@ -1223,25 +1620,45 @@ class HudController(NSObject):
         self._last_skip_reason = None
         self._read_fail_since = None
         self._read_fail_hidden = False
+        self._empty_frame_since = None
 
-        if frontmost:
-            self._next_read_ts = 0
-            _log("前台切换 · 微信回到前台，强制重新读屏")
+        if app is None:
+            _log("前台切换 · 聊天应用离开前台，隐藏面板并清空旧结果")
+            self._push("applyForegroundHidden:", "聊天应用不在前台")
         else:
-            _log("前台切换 · 微信离开前台，隐藏面板并清空旧结果")
-            self._push("applyForegroundHidden:", "微信不在前台")
+            self._next_read_ts = 0
+            if prev is not None:
+                # 适配器→适配器（切换应用等）与离开一样是一次硬边界：旧会话与旧候选
+                # 必须下屏，否则点「填入」会把给前一个 App 写的回复填进当前 App。
+                _log(f"前台切换 · 切换到{app.display_name}，清空面板并强制重新读屏")
+                self._push("applyForegroundHidden:", f"已切换到{app.display_name}")
+            else:
+                _log(f"前台切换 · {app.display_name}回到前台，强制重新读屏")
         return True
 
     def tick_(self, timer):
+        if getattr(self, "_calibrating", False):
+            return
         # Check activation before pause/busy/read-cadence gates.  The timer keeps
-        # firing while OCR is in flight, so a quick WeChat -> Chrome -> WeChat
+        # firing while OCR is in flight, so a quick chat app -> browser -> chat app
         # round trip still advances _foreground_epoch and retires that capture.
-        frontmost_is_wechat = frontmost_app_is_wechat()
-        if frontmost_is_wechat is None:
+        app = frontmost_app()
+        if app is UNKNOWN:
             return
-        self._set_foreground_state(frontmost_is_wechat)
-        if not frontmost_is_wechat:
+        self._set_foreground_state(app)
+        if app is None:
             return
+        # Follow the window from cheap metadata every tick, not from read results (#93):
+        # in manual-calibration mode one read is a full multi-second OCR, and positioning
+        # used to wait out two whole read cycles (the two-tick debounce) after a drag.
+        # Metadata-only enumeration, ~1-5 ms. Screen-capture apps only — the text-interface panel
+        # follows its AX read path. The read path's applyPosition stays as a backstop;
+        # when both agree the dead-band absorbs the duplicate.
+        if not self._paused and getattr(app, "needs_screen_capture", False):
+            win = find_wechat_window(previous_wid=getattr(self, "_win_wid", None))
+            if win is not None:
+                self._position_near({"wid": win.wid, "x": win.x, "y": win.y,
+                                     "w": win.w, "h": win.h})
         if self._paused or self._busy or time.time() < self._next_read_ts:
             return  # paused, a previous read is still running, or not due yet
         self._busy = True
@@ -1256,50 +1673,84 @@ class HudController(NSObject):
 
     @objc.python_method
     def _work_inner(self):
+        self.reload_conversations()
         # The panel is a global floating window. Showing it over Chrome while continuing
-        # to reuse the last WeChat frame makes stale text look like browser OCR. Treat app
+        # to reuse the last chat frame makes stale text look like browser OCR. Treat app
         # activation as a hard display/capture boundary before even checking permissions:
         # a missing screen grant must not keep an error panel floating over other apps.
-        frontmost_is_wechat = frontmost_app_is_wechat()
-        if frontmost_is_wechat is None:
-            # A transient NSWorkspace failure is not proof that the user left WeChat.
+        app = frontmost_app()
+        if app is UNKNOWN:
+            # A transient NSWorkspace failure is not proof that the user left the chat app.
             # Freeze both reads and UI updates for one short tick without cancelling a
             # valid in-flight reply or manufacturing a leave/return transition.
             self._next_read_ts = time.time() + FAST_TICK
             return
-        self._set_foreground_state(frontmost_is_wechat)
-        if not frontmost_is_wechat:
+        self._set_foreground_state(app)
+        if app is None:
             self._next_read_ts = time.time() + FAST_TICK
             return
-        if not screen_capture_ok():
-            if not self._asked_permission:
-                self._asked_permission = True
-                request_screen_capture()      # opens the system prompt
-            self._push("applyError:", "需要屏幕录制权限 · 系统设置 › 隐私与安全性")
+        if app.needs_screen_capture:
+            if not screen_capture_ok():
+                if not self._asked_permission:
+                    self._asked_permission = True
+                    request_screen_capture()      # opens the system prompt
+                self._push("applyError:", "需要屏幕录制权限 · 系统设置 › 隐私与安全性")
+                self._next_read_ts = time.time() + SLOW_TICK
+                return
+        elif not fill.has_accessibility():
+            # The text-interface path reads the accessibility tree: without the grant there is nothing to read.
+            if not self._asked_accessibility:
+                self._asked_accessibility = True
+                fill.request_accessibility()
+            self._push("applyError:", "需要辅助功能权限 · 系统设置 › 隐私与安全性")
+            self._next_read_ts = time.time() + SLOW_TICK
+            return
+        if getattr(self, "_calibrating", False):
+            return
+        if (app.needs_screen_capture
+                and getattr(self, "_calibration_required", False)
+                and self._calibration is None):
+            # 校准只约束截图路径；文本接口路径读界面树，无消息区可校准。
+            self._push("applyWaiting:", "请点击右上角校准图标，确认消息区和输入区。")
             self._next_read_ts = time.time() + SLOW_TICK
             return
         capture_foreground_epoch = self._foreground_epoch
+        capture_context_version = self._context_version
         try:
-            res = read_conversation(previous_wid=self._win_wid,
-                                    prev_fingerprint=self._fingerprint)
+            # calibration 只被截图路径接受；文本接口适配器签名里没有它，不传。
+            extra = {}
+            if app.needs_screen_capture and getattr(self, "_calibration", None):
+                extra = {"calibration": self._calibration}
+            res = app.read_conversation(previous_wid=self._win_wid,
+                                        prev_fingerprint=self._fingerprint,
+                                        prev_layout=getattr(self, "_layout_key", None), **extra)
         except Exception as e:
-            self._push("applyError:", f"读取失败: {type(e).__name__}: {str(e)[:40]}")
+            self._push("applyError:", f"读取失败: {type(e).__name__}")
             self._next_read_ts = time.time() + SLOW_TICK
+            return
+        if capture_foreground_epoch != self._foreground_epoch:
+            return
+        if getattr(self, "_calibration", None) and (res.get("calibration_error")
+                or (res.get("window") and res["window"]["wid"] != self._calibration_wid)):
+            self._calibration = None
+            self._input_calibration = None
+            self._input_calibration_wid = None
+            self._retire_calibration_results()
+            self._push("applyWaiting:", "聊天窗口已改变，请重新校准消息区域。")
             return
         # Re-check after the blocking capture/OCR.  tick_ may have observed a
         # complete leave+return while this worker was busy; in that case even a
-        # currently-frontmost WeChat does not make this old snapshot current.
-        frontmost_is_wechat = frontmost_app_is_wechat()
-        if frontmost_is_wechat is None:
+        # currently-frontmost chat app does not make this old snapshot current.
+        after = frontmost_app()
+        if after is UNKNOWN:
             self._next_read_ts = time.time() + FAST_TICK
             return
-        self._set_foreground_state(frontmost_is_wechat)
-        if (not frontmost_is_wechat
-                or capture_foreground_epoch != self._foreground_epoch):
+        self._set_foreground_state(after)
+        if after is not app or capture_foreground_epoch != self._foreground_epoch:
             self._next_read_ts = time.time() + FAST_TICK
             return
         if not res["ok"]:
-            # Window enumeration/capture can miss one frame while WeChat redraws.
+            # Window enumeration/capture can miss one frame while the chat app redraws.
             # Keep the already-current HUD stable for a short grace period, then
             # hide and force rediscovery if the failure really persists.
             now_mono = time.monotonic()
@@ -1333,6 +1784,7 @@ class HudController(NSObject):
         # message is noticed quickly (this also feeds _stable_n, the early-settle signal),
         # and only a pane that keeps moving settles back to SLOW_TICK like the old poll.
         self._fingerprint = res.get("fingerprint")
+        self._layout_key = res.get("layout")
         if res["unchanged"]:
             self._stable_n += 1
             self._burst_left = BURST_READS
@@ -1345,132 +1797,239 @@ class HudController(NSObject):
             self._stable_n = 0
             self._next_read_ts = time.time() + SLOW_TICK
 
-        # position immediately: analysis takes seconds, and a delayed correction
-        # showed up as a visible jump after the verdict landed. Pushed on unchanged
-        # frames too — the window can move while its pixels stay identical.
+        # Position from the read result as a backstop only — tick_ now drives
+        # positioning from cheap metadata every tick (#93). This keeps the panel
+        # correct when the window moved mid-read; a same-target push is absorbed
+        # by the dead-band.
         live_window = res["window"]
+        live_input_rect = res.get("input_rect")
         self._win_wid = res["window"]["wid"]
         self._push("applyPosition:", res["window"])
+        fresh_frame = not res["unchanged"]
         if res["unchanged"] and self._last_full is not None:
             # the settle/analyze gate below still runs every read; an unchanged frame
             # just skips re-deriving the messages it would act on
             res = self._last_full
+        elif (not res.get("manual_calibration") and not res["messages"] and self._last_full is not None
+              and self._last_full.get("messages")):
+            # Transient empty frame (#58): the window is still enumerated and the capture
+            # succeeded, but OCR returned 0 blocks (4.x redraw glitch). Reuse the
+            # last good read so the settle gate keeps its target and timer. Entering the
+            # streak retires in-flight workers once (a candidate computed for a vanished
+            # message must never surface) but keeps the reply target and re-arms both
+            # prework halves at the new epoch, so the settle path stays the fast one.
+            now_mono = time.monotonic()
+            if (self._empty_frame_since is not None
+                    and now_mono - self._empty_frame_since > EMPTY_FRAME_REUSE_S):
+                # A persistently empty read is no longer a one-frame glitch: give up on
+                # reuse and fall through as a real empty read (same grace as a capture
+                # miss); the key change below then clears the stale target.
+                _log(f"读屏为空已持续 {now_mono - self._empty_frame_since:.1f}s"
+                     f" · 放弃沿用上一帧")
+                self._empty_frame_since = None
+                self._last_full = None
+            else:
+                if self._empty_frame_since is None:
+                    self._empty_frame_since = now_mono
+                    _log("读屏为空 · 沿用上一帧继续分析")
+                    last_msgs = self._last_full.get("messages") or []
+                    last_thems = [m for m in last_msgs if m.side == "them"]
+                    if last_thems:
+                        self._reply_epoch += 1
+                        self.analyzed_text = None   # let the settle gate re-open
+                        self._enqueue_prework(last_thems[-1], self._active_context,
+                                              last_thems[-2].text
+                                              if len(last_thems) > 1 else "")
+                res = self._last_full
+                fresh_frame = False
         else:
+            self._empty_frame_since = None
             self._last_full = res
+            # a picked-over window list was invisible in the logs and cost a whole
+            # misdiagnosis (#91): say which window the reads moved to, geometry only
+            if res["window"].get("wid") != getattr(self, "_read_wid", None):
+                self._read_wid = res["window"].get("wid")
+                _log(f"读屏窗口切换 wid={res['window'].get('wid')} "
+                     f"{res['window'].get('w', 0):.0f}x{res['window'].get('h', 0):.0f}")
             self._push("applyChat:", res.get("chat_title") or "")
 
-        res = dict(res, window=live_window)
+        res = dict(res, window=live_window, input_rect=live_input_rect)
+        if res.get("manual_calibration"):
+            self._input_target = None
+            editor = getattr(self, "_input_calibration", None)
+            if editor is not None and self._input_calibration_wid == res['window']['wid']:
+                from visual_fill import chat_signature
+                rect = editor.screen_rect(res['window'])
+                signature_rect = self._calibration.screen_rect(res['window'])
+                self._input_target = dict(box=None,rect=None,window=dict(res['window']),
+                    visual_rect=rect,manual_region=editor,signature_rect=signature_rect,
+                    chat_signature=chat_signature(res['window'],signature_rect),
+                    app=app.key,   # 填入前复核：手动校准目标同样必须带归属标记（#105）
+                    reason="手动校准输入区")
+            self._input_window = dict(res["window"])
+            self._input_next = float("inf")
+            if not res.get("chat_title"):
+                res = dict(res, messages=[])
         # AX traversal stays on the read worker, never the Cocoa drawing thread.
         now_input = time.monotonic()
         if (res["window"] != getattr(self, "_input_window", None)
                 or now_input >= getattr(self, "_input_next", 0)):
-            self._input_target = fill.locate_input(res["window"])
-            if self._input_target["box"] is None:
+            target = app.locate_input(res["window"])
+            # AX can transiently return None while the chat app rebuilds its tree during a
+            # foreground/window transition. Keep this frame readable and let the next
+            # scheduled read retry; never let a missing target abort the read worker.
+            target = dict(target) if isinstance(target, dict) else {
+                "box": None, "rect": None, "window": dict(res["window"]),
+                "reason": "输入框暂时不可用",
+            }
+            target["app"] = app.key   # 填入前复核：目标必须属于当前 App
+            if target["box"] is None and app.needs_screen_capture:
+                # 视觉后备要截图/OCR，只有走屏幕采集的 App 才允许进入；
+                # 文本接口路径绝不截图——box 为 None 就让它保持 None（填入按钮报原因）。
                 from input_region import locate_visual_input
-                self._input_target["visual_rect"] = locate_visual_input(res["window"])
-                if self._input_target["visual_rect"]:
+                target["visual_rect"] = (res.get("input_rect")
+                                         or locate_visual_input(res["window"]))
+                if target["visual_rect"]:
                     from visual_fill import chat_signature
-                    self._input_target["chat_signature"] = chat_signature(res["window"], self._input_target["visual_rect"])
+                    target["chat_signature"] = chat_signature(res["window"], target["visual_rect"])
+            if capture_foreground_epoch != self._foreground_epoch:
+                self._next_read_ts = time.time() + FAST_TICK
+                return
+            self._input_target = target
             self._input_window = dict(res["window"])
             self._input_next = now_input + 1.0
-        msgs = res["messages"]
-        thems = [m for m in msgs if m.side == "them"]
-        newest = thems[-1] if thems else None
-        prev_text = thems[-2].text if len(thems) > 1 else ""
+        with self._context_lock:
+            self.reload_conversations()
+            if capture_context_version != self._context_version:
+                self._fingerprint = None
+                self._last_full = None
+                return
+            msgs = res["messages"]
+            # 手动校准模式下，无法确认归属的文字不进入会话历史与模型上下文。
+            # 必须在 visible/observe 之前过滤——事后过滤会让 _observed_offset 的
+            # 索引错位；检测框仍画原始列表（含「未确认」框），见下方 applyBoxes。
+            overlay_msgs = None
+            if res.get("manual_calibration"):
+                overlay_msgs = msgs
+                msgs = [m for m in msgs if m.side != "unknown"]
+            visible = [(m.text, m.side, m.sender or "") for m in msgs]
+            self._observed_messages, self._observed_offset = visible, 0
+            if self.history_enabled and self.conversations and not self.conversations.error:
+                try:
+                    self._observed_messages, self._observed_offset = self.conversations.observe(
+                        res.get("chat_title"), visible, record=fresh_frame)
+                except (OSError, ValueError):
+                    _log("保存会话历史失败，使用当前画面继续分析")
+                    self._push("applyError:", "会话历史保存失败，请检查磁盘空间及权限")
+            thems = [m for m in msgs if m.side == "them"]
+            newest = thems[-1] if thems else None
+            prev_text = thems[-2].text if len(thems) > 1 else ""
 
-        key = (res.get("chat_title") or "", newest.text) if newest else None
-        if key != self._reply_key:
-            self._reply_epoch += 1
-            self._reply_key = key
-            self.last_seen = None
-            self.analyzed_text = None
-            self._pregen_req = self._pregen_result = None
-            self._gen_epoch += 1
+            context = self._context_text(msgs, newest) if newest else None
+            # key 带 app.key：不同 App 的同名会话 / 同文消息不得共用一条回复纪元
+            key = (app.key, res.get("chat_title") or "", newest.text, context,
+                   tuple(visible)) if newest else None
+            self._active_context = context
+            if key != self._reply_key:
+                self._reply_epoch += 1
+                self._reply_key = key
+                self.last_seen = None
+                self.analyzed_text = None
+                self._pregen_req = self._pregen_result = None
+                self._gen_epoch += 1
 
-        # YOLO overlay: repaint whenever a read produced geometry — unchanged reads reuse
-        # the cached messages, so the boxes stay up even while the pane is quiet
-        if self._show_boxes:
-            self._push("applyBoxes:", (res["window"], msgs,
-                                       newest.text if newest else None))
-        if newest is None:
-            self._push("applyWaiting:", None)
-            return
-        now = time.time()
+            # YOLO overlay: repaint whenever a read produced geometry — unchanged reads reuse
+            # the cached messages, so the boxes stay up even while the pane is quiet
+            if self._show_boxes:
+                self._push("applyBoxes:", (res["window"], overlay_msgs or msgs,
+                                           newest.text if newest else None))
+            if newest is None:
+                self._push("applyWaiting:", "暂未确认输入区边界，暂停分析"
+                           if res.get("input_unresolved") else None)
+                return
+            now = time.time()
 
-        # --- anti-flood: track arrivals, never analyze mid-burst
-        if newest.text != self.last_seen:
-            self.last_seen = newest.text
-            self.last_change_ts = now
-            # only on arrival: this function runs every second, and a per-tick line would
-            # bury the timing that matters
-            t = res.get("timing_ms") or {}
-            first_read = not self._read_once
-            self._read_once = True
-            # Vision loads on the first call and costs ~2x steady state; saying so keeps a
-            # one-off from being read as a regression (same reason the judge line does it)
-            note = "（首次，含 Vision 加载）" if first_read and t.get("ocr", 0) > 400 else ""
-            # say when the fast in-process capture was refused: otherwise a permanent
-            # fallback looks like ordinary slowness instead of something to report
-            slow_cap = " · 抓屏走了子进程（进程内被抓图接口拒绝）" \
-                if t.get("capture_path") == "subprocess" else ""
-            _log(f"读屏 抓取 {t.get('capture', 0):.0f}ms + OCR {t.get('ocr', 0):.0f}ms"
-                 f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）"
-                 f"{note}{slow_cap}")
-            _log(f"新消息 · 这次调用先跑，停稳 {SETTLE_S}s（连续 {STABLE_READS} 跳不变最早 "
-                 f"{EARLY_SETTLE_S}s）后上屏（两次完整分析最小间隔 {MIN_GAP_S}s）")
-            # latest-wins: fire now, supersede on the next arrival, spend at settle.
-            # Tones are captured here — a dropdown click during the window invalidates the
-            # result at consumption time (checked in _take_pregen). 上游这里还要再起一个
-            # 预判请求（本地判断模型，不花钱所以每条都判）；判断现在就在这一次调用里。
-            self._pregen_req = (newest.text, self._context_text(msgs, newest),
-                                tuple(self.slot_tones), self._reply_epoch)
-            self._pregen_result = None
-            self._pregen_event.set()
-            # keep the previous verdict readable; just badge that something new landed
-            self._push("applyIncoming:", (newest.text, newest.sender, prev_text))
+            # --- anti-flood: track arrivals, never analyze mid-burst
+            if newest.text != self.last_seen:
+                self.last_seen = newest.text
+                self.last_change_ts = now
+                # only on arrival: this function runs every second, and a per-tick line would
+                # bury the timing that matters
+                t = res.get("timing_ms") or {}
+                first_read = not self._read_once
+                self._read_once = True
+                # Vision loads on the first call and costs ~2x steady state; saying so keeps a
+                # one-off from being read as a regression (same reason the judge line does it)
+                note = "（首次，含 Vision 加载）" if first_read and t.get("ocr", 0) > 400 else ""
+                _log(f"读屏 抓取 {t.get('capture', 0):.0f}ms + OCR {t.get('ocr', 0):.0f}ms"
+                     f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）"
+                     f"{note}")
+                _log(f"新消息 · 这次调用先跑，停稳 {SETTLE_S}s（连续 {STABLE_READS} 跳不变最早 "
+                     f"{EARLY_SETTLE_S}s）后上屏（两次完整分析最小间隔 {MIN_GAP_S}s）")
+                # latest-wins: overwrite the slot, retire the old result — only the newest
+                # text's run can ever be consumed, and only by the settle gate below
+                self._enqueue_prework(newest, context, prev_text)
+                # keep the previous verdict readable; just badge that something new landed
+                self._push("applyIncoming:", (newest.text, newest.sender, prev_text))
 
-        # Anti-flood, two signals: the blind wait (SETTLE_S, unchanged upper bound) or a
-        # content-stability early open — the pane went quiet for STABLE_READS consecutive
-        # reads spanning at least EARLY_SETTLE_S, which is itself evidence the burst is
-        # over. A burst keeps resetting _stable_n, so mid-burst opens cannot happen.
-        elapsed = now - self.last_change_ts
-        settled = elapsed >= SETTLE_S or (elapsed >= EARLY_SETTLE_S
-                                          and self._stable_n >= STABLE_READS)
-        cooled = (now - self.last_analyze_ts) >= MIN_GAP_S
-        pg = self._pregen_result
-        # 上游这里看的是「预判结论在不在手上」（判断是免费的本地前向，所以总是先判）。
-        # 判断合进这一次调用之后，手上有没有东西只有一个问题：早跑那份结果在不在。
-        # 在 = 这次分析的钱已经付过了，不用再等冷却；话术也得对得上，不然那份结果本来就作废。
-        pre_hit = (pg is not None and pg[0] == newest.text
-                   and pg[1] == tuple(self.slot_tones) and pg[3] == self._reply_epoch)
-        if (newest.text != self.analyzed_text and settled and not self._analyzing
-                and (pre_hit or cooled)):
-            self.last_analyze_ts = now
-            self.analyzed_text = newest.text
-            self._analyzing = True
-            if pre_hit:
-                # 结果已经在手上，_analyze 直接取走就上屏；「分析中…」只会闪一下，不推。
-                _log(f"停稳 · 早跑已就位 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
+            # Anti-flood, two signals: the blind wait (SETTLE_S, unchanged upper bound) or a
+            # content-stability early open — the pane went quiet for STABLE_READS consecutive
+            # reads spanning at least EARLY_SETTLE_S, which is itself evidence the burst is
+            # over. A burst keeps resetting _stable_n, so mid-burst opens cannot happen.
+            elapsed = now - self.last_change_ts
+            settled = elapsed >= SETTLE_S or (elapsed >= EARLY_SETTLE_S
+                                              and self._stable_n >= STABLE_READS)
+            cooled = (now - self.last_analyze_ts) >= MIN_GAP_S
+            pg = self._pregen_result
+            # 上游这里看的是「预判结论在不在手上」（判断是免费的本地前向，所以总是先判）。
+            # 判断合进这一次调用之后，手上有没有东西只有一个问题：早跑那份结果在不在。
+            # 在 = 这次分析的钱已经付过了，不用再等冷却；话术也得对得上，不然那份结果本来就作废。
+            pre_hit = (pg is not None and pg[0] == newest.text
+                       and pg[1] == tuple(self.slot_tones) and pg[3] == self._reply_epoch)
+            if (newest.text != self.analyzed_text and settled and not self._analyzing
+                    and (pre_hit or cooled)):
+                self.last_analyze_ts = now
+                self.analyzed_text = newest.text
+                self._analyzing = True
+                if pre_hit:
+                    # 结果已经在手上，_analyze 直接取走就上屏；「分析中…」只会闪一下，不推。
+                    _log(f"停稳 · 早跑已就位 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
+                else:
+                    _log(f"开始分析 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
+                    self._push("applyPending:", (newest.text, newest.sender, prev_text))
+                # off the tick path on purpose: the call takes over a second, and while it
+                # runs the loop must keep reading — a message landing mid-analysis used to
+                # wait the whole analysis out before anyone even saw it
+                threading.Thread(target=self._reply_task,
+                                 args=(self._reply_epoch, self._run_analysis,
+                                       newest, msgs, prev_text), daemon=True).start()
+            elif newest.text != self.analyzed_text:
+                # the wait is deliberate; say so once per arrival change so "it feels slow" can
+                # be told apart from "it is still waiting out the burst window"
+                why = ("消息还在变" if not settled else
+                       "上一条还在分析" if self._analyzing else
+                       f"距上次分析不足 {MIN_GAP_S}s")
+                if self._last_skip_reason != why:
+                    self._last_skip_reason = why
+                    _log(f"暂不分析（{why}）")
             else:
-                _log(f"开始分析 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
-                self._push("applyPending:", (newest.text, newest.sender, prev_text))
-            # off the tick path on purpose: the call takes over a second, and while it runs
-            # the loop must keep reading — a message landing mid-analysis used to wait the
-            # whole analysis out before anyone even saw it
-            threading.Thread(target=self._reply_task,
-                             args=(self._reply_epoch, self._run_analysis,
-                                   newest, msgs, prev_text), daemon=True).start()
-        elif newest.text != self.analyzed_text:
-            # the wait is deliberate; say so once per arrival change so "it feels slow" can
-            # be told apart from "it is still waiting out the burst window"
-            why = ("消息还在变" if not settled else
-                   "上一条还在分析" if self._analyzing else
-                   f"距上次分析不足 {MIN_GAP_S}s")
-            if self._last_skip_reason != why:
-                self._last_skip_reason = why
-                _log(f"暂不分析（{why}）")
-        else:
-            self._last_skip_reason = None
+                self._last_skip_reason = None
+
+    @objc.python_method
+    def _enqueue_prework(self, newest, context, prev_text):
+        """Queue the early run at the current reply epoch (latest-wins).
+
+        Fired on arrival and re-fired when an empty-OCR frame retires the in-flight
+        workers (#58): overwriting the slot means only the newest text's result can
+        ever be consumed, and only by the settle gate. Tones are captured here — a
+        dropdown click during the window invalidates the result at consumption time
+        (checked in _take_pregen). 上游这里排两个队：判断一个、生成一个；判断合进这一次
+        调用之后只剩下面这一个（`prev_text` 留着是为了保住上游的签名和调用点）。
+        """
+        self._pregen_req = (newest.text, context,
+                            tuple(self.slot_tones), self._reply_epoch)
+        self._pregen_result = None
+        self._pregen_event.set()
 
     @objc.python_method
     def _run_analysis(self, newest, msgs, prev_text: str):
@@ -1479,8 +2038,8 @@ class HudController(NSObject):
                 return
             self._analyze(newest, msgs, prev_text)
         except Exception as e:
-            _log(f"分析失败 {type(e).__name__}: {str(e)[:60]}")
-            self._push("applyError:", f"分析失败: {type(e).__name__}: {str(e)[:40]}")
+            _log(f"分析失败 {type(e).__name__}")
+            self._push("applyError:", f"分析失败: {type(e).__name__}")
         finally:
             self._analyzing = False
 
@@ -1502,16 +2061,18 @@ class HudController(NSObject):
                 if req is None:
                     continue
                 text, context, tones, epoch = req
+                self.reload_conversations()
                 if self._paused or text != self.last_seen or epoch != self._reply_epoch:
                     continue          # superseded while queued: only the newest text counts
                 self._pregen_running = True
                 gen = None
                 try:
-                    gen = self.generator.generate(text, "", list(tones), context)
+                    gen = self.generator.generate(chat_context.model_message(text, context), "", list(tones), context)
                 except Exception:
                     gen = None        # a failed early run just means the settle path regenerates
                 # store BEFORE clearing _pregen_running, so _take_pregen never observes
                 # "not running" without the result already visible
+                self.reload_conversations()
                 if (gen is not None and not self._paused and text == self.last_seen
                         and epoch == self._reply_epoch):
                     self._pregen_result = (text, tones, gen, epoch)
@@ -1547,43 +2108,96 @@ class HudController(NSObject):
 
     @objc.python_method
     def _gen_with_pregen(self, text: str, context: str | None,
-                         on_candidate=None) -> dict:
+                         make_hook=None) -> dict:
         """Generate, preferring an early run already in flight or finished (full path).
 
-        The hook only reaches the fresh call: an early-run hit already has all its lines,
-        and _finish_generate paints them as soon as the result is in hand.
+        `make_hook` builds the streaming callback and is only called for a fresh call: an
+        early-run hit already has all its lines, and _finish_generate paints them as soon as
+        the result is in hand. Building the hook anyway would bump _gen_epoch and knock an
+        in-flight 换话术 stream off its slot — upstream's _run_generation avoids that on
+        purpose ("A hit never creates a hook"), and so does this.
         """
         tones = tuple(self.slot_tones)
         gen, _waited = self._take_pregen(text, tones)
         if not self._reply_current():
             return {"groups": []}
         if gen is None:
-            gen = self.generator.generate(text, "", list(tones), context, on_candidate)
+            on_candidate = make_hook() if make_hook else None
+            gen = self.generator.generate(chat_context.model_message(text, context), "", list(tones), context, on_candidate)
         return gen
 
+    # 上游这里还有 _run_generation：预判命中时那条「判断已上屏，只收生成 + 排序」的
+    # 半路。判断和候选现在是同一次调用的两部分，没有半路可走——_work_inner 两条分支都直接
+    # 进 _run_analysis / _analyze，早跑命中在 _take_pregen 里体现。
     @objc.python_method
-    def _context_text(self, msgs, newest, turns: int = CONTEXT_TURNS) -> str | None:
-        """The last few turns, each prefixed with who said it — shared by both halves.
+    def reload_conversations(self):
+        with self._context_lock:
+            store = self.conversations
+            if store is not None:
+                store.reload()
+                if store.revision != getattr(self, '_conversation_revision', 0):
+                    self._conversation_revision = store.revision
+                    self._context_changed()
+                    if store.error:
+                        _log(store.error)
+                        self._push_reply("applyError:", store.error, self._reply_epoch)
+            return store
 
-        The names are the point. The judge used to receive a jumble of lines with no
-        speaker, which in a group chat throws away the most useful clue available: who is
-        talking, and whether the last thing said was mine. One-to-one chats render no name
-        above the bubble, so 我/对方 stands in.
+    @objc.python_method
+    def _context_changed(self):
+        self._context_version += 1
+        self._reply_epoch += 1
+        self._gen_epoch += 1
+        self._reply_key = None
+        self.last_seen = self.analyzed_text = None
+        self._pregen_req = self._pregen_result = None
+        self._active_context = None
+        self._observed_messages = None
+        self._observed_offset = 0
+        self._fingerprint = None
+        self._next_read_ts = 0
+        self._push_reply("applyWaiting:", None, self._reply_epoch)
 
-        上游两半各取各的深度：生成要整条对话线索（CONTEXT_TURNS），判断是单独一次前向、
-        prompt 每次重付，所以只给两轮（JUDGE_TURNS）。合成一次之后只有一份 prompt，
-        判断跟着生成一起看 CONTEXT_TURNS 那几轮——比上游多，且不多花一分钱。
+    @objc.python_method
+    def save_background(self, title, text):
+        with self._context_lock:
+            self.reload_conversations()
+            if self.conversations is None:
+                raise OSError("会话存储不可用")
+            self.conversations.save_background(title, text)
+            if title == (self._last_full or {}).get("chat_title"):
+                self._context_changed()
 
-        The message under judgment is excluded **by identity**, not by position: `newest` is
-        the last message from the other side, which is not the same as the last element of
-        `msgs` (my own replies come after it).
-        """
-        prior = [m for m in msgs if m is not newest][-turns:]
-        if not prior:
-            return None
-        return "\n".join(
-            f"{m.sender or {'me': '我', 'them': '对方'}.get(m.side, '方向未确认')}: {m.text}"
-            for m in prior)
+    @objc.python_method
+    def configure_context(self, enabled, limit):
+        count = chat_context.message_limit(limit)
+        with self._context_lock:
+            if (self.history_enabled, self.context_limit) != (enabled, count):
+                self.history_enabled, self.context_limit = enabled, count
+                self._context_changed()
+
+    @objc.python_method
+    def clear_history(self, title=None):
+        with self._context_lock:
+            self.reload_conversations()
+            if self.conversations is None:
+                raise OSError("会话存储不可用")
+            self.conversations.clear_history(title)
+            self._context_changed()
+
+    @objc.python_method
+    def _context_text(self, msgs, newest) -> str | None:
+        if hasattr(self._reply_worker, "context"):
+            return self._reply_worker.context
+        with self._context_lock:
+            store = self.reload_conversations()
+            title = (self._last_full or {}).get("chat_title")
+            return chat_context.context_text(
+                self._observed_messages if self._observed_messages is not None else
+                [(m.text, m.side, m.sender or "") for m in msgs],
+                self._observed_offset + next(i for i, m in enumerate(msgs) if m is newest),
+                limit=self.context_limit,
+                background=store.data.get(title, {}).get('background', '') if store else "")
 
     @objc.python_method
     def _analyze(self, newest, msgs, prev_text: str = ""):
@@ -1595,13 +2209,13 @@ class HudController(NSObject):
         上游这里是一个 2 线程的池子：判断（本地前向或云端 Jev）和生成真并行，判断通常
         先回、先上屏，候选晚一秒左右跟上。合成一次之后没有可并行的东西了——判断和候选是
         同一份回答的两部分。**这是这次合并唯一一处面板变慢的地方**：意图/风险不再比候选
-        早到，两边一起出现。换来的是少一次调用、少一把 key，以及判断能看到 4 轮上下文。
-        推的顺序仍然是判断在前、候选在后，applyJudgment_ 照旧负责起新一轮候选的行号。
+        早到，两边一起出现。换来的是少一次调用、少一把 key，以及判断能看到和生成一样多的
+        上下文。推的顺序仍然是判断在前、候选在后，applyJudgment_ 照旧负责起新一轮候选的行号。
         """
         t0 = time.perf_counter()
         context = self._context_text(msgs, newest)
         # 早跑命中就直接用那份结果（判断也在里面）；没命中才现发一次，那一次才走流式回调
-        gen = self._gen_with_pregen(newest.text, context, self._stream_hook(t0))
+        gen = self._gen_with_pregen(newest.text, context, lambda: self._stream_hook(t0))
         verdict = gen.get("verdict")
         if verdict is not None:
             _log(f"判断 → {verdict.get('intent', '?')}"
@@ -1628,13 +2242,13 @@ class HudController(NSObject):
         if not self._reply_current():
             return
         groups = gen.get("groups") or []
-        failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
+        failed = [str(g["slot"]) for g in groups if g.get("error")]
         _log(f"生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms{note} · {len(groups)} 个话术并发"
              f" → {sum(len(g['texts']) for g in groups)} 条候选"
              + (f" · 失败: {'; '.join(failed)}" if failed else ""))
         payload = self._payload_from_gen(gen)
         if payload is None:
-            err = (gen.get("error") or "空结果")[:60]
+            err = "服务未返回可用候选，请检查模型设置"
             _log(f"生成无可用候选: {err}")
             self._push("applyError:", f"候选生成失败: {err}")
             return
@@ -1646,7 +2260,8 @@ class HudController(NSObject):
     @objc.python_method
     def _push(self, selector: str, payload=None):
         if selector in {"applyIncoming:", "applyPending:", "applyJudgment:",
-                        "applyCandidates:", "applyStreamLine:", "applyWaiting:", "applyError:"}:
+                        "applyCandidates:", "applyRegenerated:", "applyTones:",
+                        "applyStreamLine:", "applyWaiting:", "applyError:"}:
             epoch = getattr(self._reply_worker, "epoch", self._reply_epoch)
             self._push_reply(selector, payload, epoch)
             return
@@ -1655,14 +2270,17 @@ class HudController(NSObject):
     @objc.python_method
     def _reply_task(self, epoch, callback, *args):
         self._reply_worker.epoch = epoch
+        self._reply_worker.context = self._active_context
         try:
             return callback(*args)
         finally:
             del self._reply_worker.epoch
+            del self._reply_worker.context
 
     @objc.python_method
     def _reply_current(self):
-        return (self._wechat_frontmost is True
+        self.reload_conversations()
+        return (self._app is not None
                 and self._reply_key is not None and not self._paused
                 and getattr(self._reply_worker, "epoch", self._reply_epoch) == self._reply_epoch)
 
@@ -1672,8 +2290,9 @@ class HudController(NSObject):
             "applyReplyUpdate:", (epoch, selector, payload), False)
 
     def applyReplyUpdate_(self, update):
+        self.reload_conversations()
         epoch, selector, payload = update
-        if self._wechat_frontmost is not True or epoch != self._reply_epoch:
+        if self._app is None or epoch != self._reply_epoch:
             return
         if selector not in {"applyWaiting:", "applyError:"} and not self._reply_current():
             return
@@ -1694,7 +2313,7 @@ class HudController(NSObject):
         else:
             # Lightweight test harnesses load this callback without constructing AppKit.
             self.rows["cand_header"].setStringValue_("候选回复")
-        self._render("status", "等待可确认的对方消息…", PALETTE["muted"])
+        self._render("status", _payload or "等待可确认的对方消息…", PALETTE["muted"])
 
     # --- main-thread callbacks (AppKit is not thread safe)
     def applyChat_(self, title):
@@ -1801,8 +2420,13 @@ class HudController(NSObject):
         self._show()                       # never vanish without telling the user why
         self._render("status", text, PALETTE["red"])
 
+    # 上游这里还有 applyStatus_ / applyWarmFailed_ / applyWarmDone_ 三个回调：本地判断模型
+    # 的预热要往状态行写「加载中…」、失败要写红字（#37 那台 16GB 的机器就是在这一步被系统
+    # 干掉的）、成功要把那行清掉。没有本地模型可预热，三个回调一起没了。
+
     def applyHidden_(self, reason):
-        # WeChat gone or unreadable -> take the panel away (the app "opens with WeChat")
+        # WeChat gone or unreadable -> take the panel away (the app "opens with the chat app")
+        # 上游这里还要让位给判断模型的下载进度（load_status 非空就先不隐藏面板）；没有下载了。
         self._render("status", reason, PALETTE["muted"])
         if self.panel.isVisible():
             self.panel.orderOut_(None)
@@ -1822,19 +2446,19 @@ class HudController(NSObject):
         self.applyHidden_(reason)
 
     def applyPosition_(self, win):
-        if self._wechat_frontmost is not True:
+        if self._app is None or getattr(self, "_calibrating", False):
             return
         self._position_near(win)
 
     # --- YOLO overlay callbacks (visual only; see _build_overlay)
     def applyBoxes_(self, payload):
         """Repaint the overlay from the last read's window geometry + messages."""
-        if self._wechat_frontmost is not True or not self._show_boxes:
+        if self._app is None or getattr(self, "_calibrating", False) or not self._show_boxes:
             return
         win, msgs, newest_text = payload
         W, H = win["w"], win["h"]
         flip = self._display_height()
-        # top-left (Quartz) -> bottom-left (Cocoa), covering WeChat exactly
+        # top-left (Quartz) -> bottom-left (Cocoa), covering the chat app exactly
         self._ov_panel.setFrame_display_(
             NSMakeRect(win["x"], flip - win["y"] - H, W, H), False)
         font = (NSFont.fontWithName_size_("Menlo-Bold", 10)
@@ -1875,11 +2499,13 @@ class HudController(NSObject):
             x, y, w, h = target["visual_rect"]
             color = PALETTE["amber"]
             rect = NSMakeRect(x-win["x"], H-(y-win["y"])-h, w, h)
-            label = "虚线：视觉输入区 · 点击填入后校验（不发送）"
+            label = ("虚线：手动输入区 · 有草稿停止，不发送" if target.get('manual_region')
+                     else "虚线：视觉输入区 · 点击填入后校验（不发送）")
         else:
             color = PALETTE["amber"]
             rect = NSMakeRect(12, 12, 0, 0)
-            label = "输入框：" + (target["reason"] if target else "定位中…")
+            label = ("输入框：请点击右上角图标校准" if getattr(self,"_calibration_required",False)
+                     else "输入框：" + (target["reason"] if target else "定位中…"))
         chip = NSAttributedString.alloc().initWithString_attributes_(label, {
             NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.whiteColor(),
             NSBackgroundColorAttributeName: color.colorWithAlphaComponent_(0.85)})
@@ -1900,25 +2526,34 @@ class HudController(NSObject):
 
     # --------------------------------------------------------------- warm-up
     @objc.python_method
-    def _warm(self):
-        """Pay the one-off load in the background: Vision OCR.
+    def _warm_apps(self):
+        """Pay each chat app's one-off read-path load (Vision for the OCR path; the text-interface path has none)."""
+        for app in APPS:
+            ms = app.warm()
+            if ms is None:
+                continue                  # 文本接口路径没有一次性加载
+            if ms >= 0:
+                self._read_once = True    # Vision's one-off load is paid; first read is steady-state
+                _log(f"预热 {app.display_name} 读屏就绪 · {ms:.0f}ms")
+            else:
+                _log(f"预热 {app.display_name} 读屏失败 · 首次读屏会稍慢，不影响使用")
 
-        The first real message used to carry it (~0.7 s); starting it here, right after
-        launch, moves it to idle time. The OCR warm-up is independent of WeChat entirely
-        (a blank canvas, not a window).
+    @objc.python_method
+    def _warm(self):
+        """Pay the one-off loads in the background: each app's read path.
+
+        The first real message used to carry them; starting them here, right after
+        launch, moves them to idle time. The OCR warm-up is independent of the chat app
+        entirely (a blank canvas, not a window).
 
         上游这里还要预热判断模型：本地 decider-2b 第一次加载 9–15 秒（含下载可能是几分钟），
         所以面板要显示「判断模型加载中…」、失败了还要红字提示，#37 那台 16GB 的机器就是
         在这一步被系统干掉的（judge.low_memory_reason 的内存守卫也是为它写的）。判断合进
         那一次网络调用之后，本地没有任何东西要加载——整段没了，连带 WARM_STATUS、
-        applyWarmDone_、applyWarmFailed_ 和那个内存守卫。
+        applyStatus_ / applyWarmDone_ / applyWarmFailed_、那个内存守卫，以及 #38 那个
+        「首次引导选判断方式」的对话框（_onboarding_needed / maybeOnboard_ / _record_onboarding）。
         """
-        ocr_ms = warm_ocr()
-        if ocr_ms >= 0:
-            self._read_once = True    # Vision's one-off load is paid; first read is steady-state
-            _log(f"预热 OCR 就绪 · {ocr_ms:.0f}ms")
-        else:
-            _log("预热 OCR 失败 · 首次读屏会稍慢，不影响使用")
+        self._warm_apps()
 
 
 def warn_if_no_generation_key() -> None:
@@ -1971,9 +2606,14 @@ def main() -> None:
          f"{(_base + ' / ' + _model) if _key else '未配置 Key（面板会是空的）'}"
          + ("（内置默认）" if _src == BUILTIN_SOURCE else "")
          + (" · YOLO 框开" if controller._show_boxes else ""))
+    if styles.REJECTED_TONES:
+        # the dropdown silently missing a tone the user typed is a support ticket; say
+        # why it was refused and what a passing description looks like, once, at startup
+        _log("自定义话术未加载 · " + "；".join(styles.REJECTED_TONES))
     controller._show()
-    # Warm Vision OCR while the panel is idle, so the user's first message pays only
-    # steady-state costs. 上游这里还要预热本地判断模型；这一版没有本地模型可预热。
+    # Warm each app's read path (Vision OCR for the capture apps) while the panel is idle,
+    # so the user's first message pays only steady-state costs. 上游这里还要先弹 #38 的
+    # 「选择判断方式」，再预热本地判断模型；这一版没有判断方式可选，也没有本地模型可预热。
     threading.Thread(target=controller._warm, daemon=True).start()
     timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
         FAST_TICK, controller, "tick:", None, True)

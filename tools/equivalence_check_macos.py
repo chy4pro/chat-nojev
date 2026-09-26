@@ -234,6 +234,15 @@ class Palette(dict):
         return self[key]
 
 
+class _ChatContextStub:
+    """上游 src/chat_context.py 里被 hud 用到的那一个函数。会话上下文不是这套差分的
+    题目（两边喂的是同一份），所以这里只要把消息原样递回去就够了。"""
+
+    @staticmethod
+    def model_message(text, context=None):
+        return text
+
+
 def hud_namespace(tree: str, names, extra=None) -> dict:
     """把 hud.py 里这几个函数（连同它们要的模块级小函数）抠出来跑在一个干净的名字空间里。"""
     import math
@@ -242,7 +251,9 @@ def hud_namespace(tree: str, names, extra=None) -> dict:
     source = open(os.path.join(tree, "src/hud.py"), encoding="utf-8").read()
     module = ast.parse(source)
     ns: dict = {"PALETTE": Palette(), "isfinite": math.isfinite, "time": _time,
-                "_log": lambda *a, **k: None, "styles": None}
+                "_log": lambda *a, **k: None, "styles": None,
+                # 上游 v0.6.0 起 _rank_payload 会调 chat_context.model_message()
+                "chat_context": _ChatContextStub()}
     ns.update(extra or {})
     found = {}
     for node in ast.walk(module):
@@ -273,6 +284,13 @@ class FakePanel:
         self._stream_rows = {"stale": 1}
         import threading
         self._model_lock = threading.Lock()
+        # 上游 v0.6.0 的 _rank_payload 从 self 上读会话上下文：
+        #   context = getattr(self._reply_worker, "context", self._active_context)
+        # 少一个属性,AttributeError 会被它自己的 `except Exception: scores = {}` 吞掉,
+        # 于是排序静默变成「没分」,所有 prob 归零——看起来像我们这边出了分歧。
+        # 下面 assert_upstream_ranked() 会当场把这种情况认出来,别把它当差分结果。
+        self._reply_worker = threading.local()
+        self._active_context = None
 
     # —— 被抠出来的那几段函数当方法用
     def __getattr__(self, name):
@@ -390,7 +408,29 @@ def run_upstream(tree: str) -> dict:
         snapshot["calls"] = calls
         snapshot["gen_error"] = gen.get("error")
         out[scn["name"]] = snapshot
+    assert_upstream_ranked(out)
     return out
+
+
+def assert_upstream_ranked(out: dict) -> None:
+    """上游的 _rank_payload 把任何异常都吞成「没分」（`except Exception: scores = {}`），
+    所以桩少一个属性、上游换一个它从 self 上读的字段,排序就静默失效:每条 prob 归零,
+    报告出来长得像「我们这边算错了分」。那是桩坏了,不是差分结果,这里当场认出来。
+
+    判据:除了那几个本来就该没分的场景（判断挂了 → intent 为空 → 上游根本不排序),
+    至少要有一个场景真的排过序,而且排出来的分不全是 0。"""
+    ranked = [n for n, snap in out.items() if snap["calls"]["rank"] > 0]
+    if not ranked:
+        raise SystemExit(
+            "上游那侧一次都没排序。要么场景数据不对,要么 FakePanel 缺了上游 _rank_payload "
+            "从 self 上读的属性（它自己会把 AttributeError 吞掉）。这不是差分结果。")
+    for name in ranked:
+        probs = [it["prob"] for group in out[name]["final_candidates"] for it in group[2]]
+        if any(probs):
+            return
+    raise SystemExit(
+        f"上游排了序（{len(ranked)} 个场景）但每条 prob 都是 0。同上:多半是 FakePanel "
+        "缺属性被 `except Exception` 吞了。这不是差分结果。")
 
 
 # ---------------------------------------------------------------------------

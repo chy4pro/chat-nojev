@@ -1,6 +1,6 @@
-"""One-click 「填入」: put a candidate reply into WeChat's input box.
+"""One-click 「填入」: put a candidate reply into the chat app's input box.
 
-The AX path below remains preferred. When WeChat exposes no input control, an
+The AX path below remains preferred. When the chat app exposes no input control, an
 explicit Fill click can use visual_fill's checked keyboard fallback. It does not
 use the clipboard or Return; uncertain readback is reported, never retried.
 
@@ -10,7 +10,7 @@ Preferred mechanism — the Accessibility API:
     text is verifiably there.
 
 Why not the obvious pasteboard + synthesized Cmd+V, which is what this file used to do:
-  * a paste only reaches the *frontmost* app, so WeChat has to be brought forward first —
+  * a paste only reaches the *frontmost* app, so the chat app has to be brought forward first —
     and a non-active accessory app cannot reliably do that on current macOS (measured:
     NSRunningApplication activation and AXFrontmost both report success while the app stays
     inactive). When that step fails, the keystroke lands in whatever app IS frontmost, i.e.
@@ -61,8 +61,8 @@ MAX_NODES = 2000
 # Reason strings are shown by the HUD in its status line, so they read as sentences.
 REASON_EMPTY = "没有可填入的内容"
 REASON_NO_ACCESS = "未授予辅助功能权限"
-REASON_NO_WECHAT = "没找到微信应用"
-REASON_NO_INPUT = "未取得可用的微信输入控件"
+REASON_NO_WECHAT = "没找到目标聊天应用"
+REASON_NO_INPUT = "未取得可用的聊天输入控件"
 REASON_WRITE_FAILED = "写入输入框失败"
 REASON_NOT_VERIFIED = "写入后没读到内容，可能没填进去"
 REASON_BUSY = "上一次填入还没结束"
@@ -169,7 +169,7 @@ def locate_input(win):
     x, y, w, h = rect
     wx, wy, ww, wh = bounds
     if not (wx <= x and wy <= y and x+w <= wx+ww+3 and y+h <= wy+wh+3):
-        result["reason"] = "输入控件不在当前微信窗口内"
+        result["reason"] = "输入控件不在当前聊天窗口内"
         return result
     result.update(box=box, rect=rect, reason="填入目标")
     if _ax_value(box) is None:
@@ -331,9 +331,9 @@ if __name__ == "__main__":
     print(f"辅助功能权限: {'已授予' if has_accessibility() else '未授予'}")
     _app = _wechat_app()
     if _app is None:
-        print("微信进程: 未找到")
+        print("目标进程: 未找到")
     else:
-        print(f"微信进程: {_app.localizedName()} ({_app.bundleIdentifier()})")
+        print(f"目标进程: {_app.localizedName()} ({_app.bundleIdentifier()})")
         if has_accessibility():
             _box = _find_input_box(_app.processIdentifier())
             print(f"输入框: {'已找到（可以填入）' if _box is not None else '没找到'}")

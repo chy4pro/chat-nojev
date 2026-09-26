@@ -60,8 +60,21 @@ MISSING_HINT = ("未配置 Key：候选回复和意图/风险判断都要它（�
                 "设置 OPENAI_API_KEY（或 ANTHROPIC_API_KEY）后重启，见 README 配置章节。")
 # 上游一次只要 {n} 行纯文本，300 够了。判断跟着一起回来之后，光 judgment 带两张概率表
 # （意图 8 项 + 风险 10 档）就装不下 300，截断了整个对象都废——所以抬到这一档。
-# 仍然是「写几句微信回复」的量级，不是思考型模型的预算。
-MAX_TOKENS = 1200
+# 仍然是「写几句回复」的量级，不是思考型模型的预算。
+#
+# 上游 v0.6.0 起每话术的候选数可配（styles.PER_TONE，1–5），而候选和判断在同一个 JSON 里，
+# 一截断就是整个对象作废、这一路话术全空。所以预算跟着候选数走：判断那两张表是固定开销,
+# 每多一条候选再加一份「一句回复 + 一个分」的量。PER_TONE=2（默认）仍然是 1200。
+_JUDGMENT_BUDGET = 900          # 两张概率表 + intent/risk/confidence/actions
+_PER_CANDIDATE_BUDGET = 150     # 一条回复 + 它在 reply_scores 里那一项
+
+
+def max_tokens(per_tone: int) -> int:
+    """这一路话术这次调用的输出预算。每次调用时读 styles.PER_TONE,设置页改了就跟着变。"""
+    return _JUDGMENT_BUDGET + _PER_CANDIDATE_BUDGET * max(1, int(per_tone))
+
+
+MAX_TOKENS = max_tokens(2)      # 默认 PER_TONE 下的值,只给日志和测试看
 # 用的是随包分发的凭据时报这个来源名，日志/--check 里能一眼分清「内置」和「你自己配的」
 BUILTIN_SOURCE = "内置默认"
 
@@ -170,16 +183,16 @@ THINKING_ONLY_HINT = ("思考型 {model}：额度被思考耗尽，正文 0 条�
 # 上游这里只要 {n} 行纯文本。判断合进来之后改成一个 JSON 对象，字段一一对应 hud 要的
 # 那几样：候选、每条的分、判断那三项。**replies 必须放第一个**——流式那一路是从没写完的
 # JSON 里抠已经收口的候选字符串（_replies_segment），judgment 先来的话候选就只能等整条回完。
-PROMPT_ONE = """刚收到一条微信消息，你要帮我回。
+PROMPT_ONE = """刚收到一条聊天消息，你要帮我回。
 
 {context_line}消息：「{message}」
 {intent_line}
-请写 {n} 条回复候选，语气统一成下面这一种，但两条的胆量要有差别：
+请写 {n} 条回复候选，语气统一成下面这一种：
 「{tone}」{instruction}
 
 硬性要求：
-- 前一条稳妥、可以直接发出去；后一条把这个语气做足，更皮、更夸张一点也行
-- 每条不超过 30 个字，是微信里打字的语气，不要客套话、不要解释
+- {variation}
+- 每条不超过 30 个字，是聊天软件里打字的语气，不要客套话、不要解释
 - 不要写出语气名称（不要写「{tone}：」这类前缀），直接从回复内容开始
 
 输出：只输出一个 JSON 对象，别的什么都别写——不要 Markdown 围栏，不要解释，不要前言后语。
@@ -193,6 +206,12 @@ PROMPT_ONE = """刚收到一条微信消息，你要帮我回。
 判断说明（judgment 照这里答；说的是这条收到的消息，不是你写的回复）：
 
 {judgment_spec}"""
+
+
+def _variation_instruction(count: int) -> str:
+    if count == 1:
+        return "只写一条稳妥、可以直接发出去的回复"
+    return "前一条稳妥、可以直接发出去；最后一条把这个语气做足，更皮、更夸张一点也行"
 
 
 # The model is told not to label its lines, and usually complies — but "usually" is exactly
@@ -520,7 +539,7 @@ class Generator:
         alt = "glm-4-flash" if api == "anthropic" else "deepseek-chat"
         if api == "anthropic":
             url = _endpoint(base, "anthropic")
-            body = {"model": model, "max_tokens": MAX_TOKENS, "temperature": 0.9,
+            body = {"model": model, "max_tokens": max_tokens(styles.PER_TONE), "temperature": 0.9,
                     "messages": [{"role": "user", "content": prompt}]}
             headers = {"content-type": "application/json", "x-api-key": key,
                        "anthropic-version": "2023-06-01"}
@@ -537,7 +556,7 @@ class Generator:
             return raw
 
         url = _endpoint(base, "openai")
-        body = {"model": model, "max_tokens": MAX_TOKENS, "temperature": 0.9,
+        body = {"model": model, "max_tokens": max_tokens(styles.PER_TONE), "temperature": 0.9,
                 "messages": [{"role": "user", "content": prompt}]}
         body.update(_extra_params())
         headers = {"content-type": "application/json", "authorization": f"Bearer {key}"}
@@ -660,6 +679,7 @@ class Generator:
                                    intent_line=intent_line,
                                    n=styles.PER_TONE, tone=tone,
                                    instruction=styles.PRESETS[tone],
+                                   variation=_variation_instruction(styles.PER_TONE),
                                    judgment_spec=questions.render_judgment_spec())
         fail = {"texts": [], "scores": {}, "verdict": None}
         emitted = 0              # 已经推上屏的行数（= 最终 texts 里的下标）
@@ -680,12 +700,11 @@ class Generator:
         try:
             raw = self._call(prompt, on_delta if on_line is not None else None)
         except ThinkingOnlyError as e:
-            return {**fail, "error": str(e)}   # already panel-ready: model named, fix suggested
+            return {**fail, "error": "模型仅返回思考内容，请关闭思考模式或更换模型"}
         except urllib.error.HTTPError as e:
-            detail = e.read()[:160].decode(errors="replace")
-            return {**fail, "error": f"HTTP {e.code} @ {self._last_url} — {detail}"}
+            return {**fail, "error": f"HTTP {e.code}：请检查模型服务设置"}
         except Exception as e:
-            return {**fail, "error": f"{type(e).__name__}: {e}"}
+            return {**fail, "error": type(e).__name__}
         obj = _json_object(raw)
         texts = self._replies(obj, raw)[:styles.PER_TONE]
         if on_line is not None:

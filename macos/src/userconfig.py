@@ -144,6 +144,21 @@ def _label() -> str:
 
 _startup_sources: list[tuple[str, dict[str, str]]] | None = None
 
+# Session-scoped overrides: read first by get(), never persisted. Exists because the
+# startup snapshot freezes os.environ at import time, so a plain os.environ write later
+# is invisible to get() — the #38 first-run dialog needs its choice honoured immediately,
+# not after a restart.
+_session_overrides: dict[str, str] = {}
+
+
+def session_override(key: str, value: str) -> None:
+    """Make `key` read as `value` for the rest of this process, ahead of every source.
+
+    An explicitly empty `value` blanks the key: later sources are not consulted.
+    The session said "no", so the env file does not get a second vote (#133).
+    """
+    _session_overrides[key] = value
+
 
 def _sources() -> list[tuple[str, dict[str, str]]]:
     if _startup_sources is not None:
@@ -156,7 +171,17 @@ def _sources() -> list[tuple[str, dict[str, str]]]:
 
 
 def get(*names: str) -> str:
-    """First non-empty value among `names`, searching sources in priority order."""
+    """First non-empty value among `names`, searching sources in priority order.
+
+    A session override wins outright, an empty one included: membership, not
+    truthiness. Truthiness let `""` fall through to the real env file, so a
+    developer with a real value in ~/.config/jev-jarvis/env failed the offline
+    tests locally (#133). (上游举的例子是 JUDGE_BACKEND=local；那个键随判断层
+    一起没了，这一版会踩到同一个坑的是 JEV_HISTORY 这类 settings 会 override 的键。)
+    """
+    for name in names:
+        if name in _session_overrides:
+            return _session_overrides[name]
     for _src, vals in _sources():
         for name in names:
             if vals.get(name):
