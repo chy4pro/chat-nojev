@@ -1,4 +1,4 @@
-jev-chat-jarvis（Jev 聊天助手 · macOS）— chat-nojev 改版
+jev-chat-jarvis（Jev 聊天助手 · macOS）
 Copyright © 2026 eatmoreduck 与 jev-chat 贡献者
 
 本软件以 MIT 协议授权（见 LICENSE）。
@@ -13,17 +13,16 @@ Copyright © 2026 eatmoreduck 与 jev-chat 贡献者
 
 本项目为独立开源项目，与其所交互的各聊天应用及其出品方均无关联。
 
+以上是上游的 NOTICE，逐字保留。下面是本仓库（chat-nojev）自己加的：来源补充，和这一份改了什么。
+
 意图/风险那套题目和判断口径来自 Jev 聊天助手（https://github.com/jev-chat/jev-chat-jarvis），
 版权归 Finderchangchang and the jev-chat contributors 所有。
-
-以上是上游的 NOTICE，逐字保留。下面这一节是本仓库自己加的：说清这一份改了什么。
 
 改了什么
 --------
 
-上游有两个模型、三次调用：判断层（本地 `Mapika/decider-2b`，或云端 TypeSafe Jev）
-出意图和风险，再单独问判断模型一次「哪条回复最合适」来排序，生成层（每种话术一次、
-并发）只写候选。这一版把三件事合成写候选那几次调用本身——同一个模型写候选、答那两道
+上游有两个模型：判断层（本地 `Mapika/decider-2b`，或云端 TypeSafe Jev）出意图和风险，
+再单独问判断模型一次「哪条回复最合适」来排序，生成层（每种话术一次、并发）只写候选。这一版把三件事合成写候选那几次调用本身——同一个模型写候选、答那两道
 判断题、写「具体行动」、并给自己写的每条候选打分。
 
 - **题面一个字没改**：8 类意图的名字和描述、0–9 风险的十档判据、两道题干、排序那句问法，
@@ -33,8 +32,9 @@ Copyright © 2026 eatmoreduck 与 jev-chat 贡献者
 - 因为写候选和打分的是同一个模型，`confidence` 和那两张概率表现在是模型的**自评**，
   不是上游判断模型那种校准过的概率。
 - **删掉了本地判断模型**（`Mapika/decider-2b`，权重实测约 3.8 GB）和云端 TypeSafe Jev 客户端。
-  一起没有的是**离线判断**：上游不配任何 key 也能出意图和风险，这一版不行。
-  这是功能上的损失，不只是少个模型；来龙去脉和「要怎么加回来」写在 `src/questions.py` 顶部。
+  一起没有的是**让判断留在本机**：上游的判断层不配 key、不联网也能出意图和风险，用云端端点
+  写候选时，判断的内容可以不出这台机器；这一版判断跟着候选一起出网。丢的主要是隐私，不是离线
+  能力——生成端点指向本地 Ollama 时，整条链路照样不出网。这是功能上的损失，不只是少个模型；来龙去脉和「要怎么加回来」写在 `src/questions.py` 顶部。
   上游围着那个本地模型做的下载进度、首次引导选判断方式、离线缓存加载与国内镜像回退，
   这一版都没有对应物。
 - 意图不再限定在那 8 个标签里：分类器只能在闭集里选，通用模型可以直接写出要显示的那句话
@@ -49,6 +49,8 @@ Copyright © 2026 eatmoreduck 与 jev-chat 贡献者
 - 设置页少了一节（「判断 · Jev」和离线模型那一块），配置里少了一组 `TYPESAFE_*`
   和 `JUDGE_BACKEND`：全程只剩一把 key。
 - 依赖少了 `torch` / `transformers` / `huggingface-hub` / `laya`——本地不再加载任何模型。
+- `src/builtin.py` 的内置共享 key 和中转地址留空：那是上游作者自建的中转，这一版不把用户接过去。
+  不配 key 就不出候选。
 - 删掉的文件：`src/judge.py`、`src/judge_jev.py`、`src/judge_zh_test.py`
   （最后那个是 decider-2b 的 22 条中文回归，测的是已经不在的模型）。
 

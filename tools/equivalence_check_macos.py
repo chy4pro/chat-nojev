@@ -174,6 +174,12 @@ SCENARIOS = [
              "但 jev-chat-jarvis-mac 的排序跟着判断一起没了（同一个模型），我们的分跟候选一起回来所以还在",
              judge_http_error=500,
              expect_diff=("final_candidates",)),
+    # 模型写了，但写出来的每一行清洗完都是空的（只剩编号）。上游那一路就是「这个话术没候选」；
+    # 我们这边同一段回答里还躺着判断，逐行兜底一旦走到，就会把 JSON 自己的行当候选抠出来。
+    # Windows 那棵树被同样的场景抓到过，这里盯着 macOS。
+    scenario("one_tone_writes_nothing_usable",
+             "一个话术写出来的全被清洗掉：两边都是那一路空着、另一路照常，判断照常",
+             replies={SLOT_A: ["1.", "2."], SLOT_B: TONE_B_REPLIES}),
 ]
 
 

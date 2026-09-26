@@ -648,9 +648,10 @@ class Generator:
         再不行退回上游的逐行读法。"""
         got = obj.get("replies")
         if isinstance(got, (list, tuple)):
-            texts = [t for t in (_clean_reply(str(x)) for x in got) if t]
-            if texts:
-                return texts
+            # 对象解析出来了、replies 也在：它说几条就是几条，**包括 0 条**——不往下走兜底。
+            # 上游的逐行读法是为「整段只有候选」写的；合并之后同一段文本里还躺着判断，
+            # 走到它就会把 JSON 自己的行（`{`、`replies": [],`、`judgment": {`）当候选抠出来。
+            return [t for t in (_clean_reply(str(x)) for x in got) if t]
         texts = [t for t in (_clean_reply(x) for x in _replies_segment(raw)) if t]
         return texts or Generator._parse(raw)
 

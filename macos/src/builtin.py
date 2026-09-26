@@ -12,8 +12,11 @@
 """
 
 # 自建中转（One API / New API）
-API_KEY = "sk-WwZDJLxyZSiLESeLjVTySpCiwjcNoJauuGVkWPNEpI2NyDbQ"
-BASE_URL = "http://101.132.131.220:11111/v1"
+# chat-nojev：留空。jev-chat-jarvis-mac 在这里放的是它自己那台中转的 token 和地址——那是原作者的
+# 服务和额度，派生版不该把自己的用户接到上面去；而且那条路是明文 HTTP，聊天内容会发到一个用户
+# 没配过的服务器。留空就是上面说的「老行为」：用户自己配一把 key，没配就弹窗。
+API_KEY = ""
+BASE_URL = ""
 
 # 中转换渠道时不用改这里：启动会问一次中转「现在提供哪些模型」，按下面顺序挑第一个
 # 存在的；都挑不到就取中转返回的第一个，问不到（离线／接口不兼容）才用 MODEL 硬上。
