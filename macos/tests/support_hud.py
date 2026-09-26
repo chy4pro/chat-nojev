@@ -34,7 +34,7 @@ def hud_harness():
     names = {'_work_inner', '_set_foreground_state', '_push', '_reply_task', '_reply_current', '_push_reply',
              'applyReplyUpdate_', 'applyWaiting_', '_context_text', '_stream_hook',
              '_take_pregen', '_gen_with_pregen', '_finish_generate', '_enqueue_prework',
-             '_pregen_loop', '_analyze', 'reload_conversations',
+             '_pregen_loop', '_analyze', '_run_analysis', 'reload_conversations',
              '_context_changed', 'save_background', 'configure_context', 'clear_history',
              '_regen_work', '_regenerate_work', 'regenerateReply_', '_rank_payload', '_payload_from_gen',
              'fillCandidate_', '_warm', '_warm_apps', 'toggleAlwaysOnTop_', 'tick_'}
