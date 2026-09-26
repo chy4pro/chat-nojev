@@ -14,7 +14,9 @@ jev_load_env() {
 
 jev_check_arch() {
     # torch (>=2.14) ships no macOS x86_64 wheel, so an x86_64 process would only
-    # die later in `uv sync` with an opaque resolver error (issue #19). Both launch
+    # die later in `uv sync` with an opaque resolver error (issue #19). chat-nojev has no
+    # torch, but it is only built and packaged for arm64 and was never run on Intel, so the
+    # refusal stays; only the message stops blaming the model it no longer has. Both launch
     # entries call this before any install work; failure sets JEV_ARCH_ERROR.
     # On a real Intel Mac `sysctl sysctl.proc_translated` fails (unknown oid), so
     # the empty/failed output falls through to the Intel branch.
@@ -23,7 +25,7 @@ jev_check_arch() {
     if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = "1" ]; then
         JEV_ARCH_ERROR="检测到本应用正以 Rosetta（Intel 转译）方式运行。请改用原生 ARM 方式启动：终端里请退出 x86_64 终端、用原生终端重跑；.app 请右键「显示简介」取消勾选「使用 Rosetta 打开」后重试。"
     else
-        JEV_ARCH_ERROR="本应用仅支持 Apple Silicon（M 系列）Mac：本地判断模型依赖的 torch 没有 Intel Mac 版本，无法运行。"
+        JEV_ARCH_ERROR="本应用仅支持 Apple Silicon（M 系列）Mac：安装包只为 arm64 构建，没有在 Intel Mac 上验证过。"
     fi
     return 1
 }

@@ -49,7 +49,7 @@
   （流式要先出候选），所以那两条路一律传空——`{intent_line}` 在这棵树里只剩 `src/generate.py`
   命令行手测还会用到。
 - **输出预算 300 → 900 + 150 × 每话术候选数**（默认 2 条即 1200）：两张概率表塞不进 300，截断就整个对象作废；候选数从 jev-chat-jarvis-mac v0.6.0 起可配 1–5，预算跟着它走（`src/generate.py` 的 `max_tokens()`）。原版一直是 300。
-- **版本号 `0.6.0` 退回 `0.1.0`；`torch` / `transformers` / `huggingface-hub` / `laya` 从依赖里删了**
+- **版本号不跟原版**（原版 `0.6.0`，这里自己从 `0.1.0` 起编，现在 `0.2.0`）；`torch` / `transformers` / `huggingface-hub` / `laya` 从依赖里删了**
   （本地模型没了，没人用它们；原版新加的 `numpy` 留着，手动校准在用）。`uv.lock` 用的是原版 0.6.0 那一份、
   还锁着这四个——没在 macOS 上重跑过 `uv lock`，**这是个已知的不一致**。
 - **没有内置共享 key。** jev-chat-jarvis-mac 的 `src/builtin.py` 放着它自己那台中转的 token 和地址，

@@ -149,7 +149,7 @@ Android `OverlayController` 的 `INTENT`/`NEEDS`/`ACTION`、macOS 的意图查�
   行为。不修就没有 CI，也就没有那个 APK。
 - **`gradlew` 补上了可执行位。** 原版提交的是 `rw-r--r--`，`./gradlew` 跑不起来（它们大概只用
   `gradlew.bat`）。
-- **版本号从 `versionCode 4` / `1.3` 退回 `1` / `0.1.0`。** 这是另一份代码，不该冒用它的版本号。
+- **版本号不跟原版，自己从 `1` / `0.1.0` 起编**（现在 `2` / `0.2.0`；原版建仓时是 `4` / `1.3`，现在 `5` / `1.4`）。这是另一份代码，不该冒用它的版本号。
 - **`apk/` 目录没有跟着拷过来。** 那里面是原版签好名的成品，跟这里的改动无关；留着只会让人装错东西。
 - 顺带改对了原版 README 里的一处笔误：危险等级是 **0–9**，不是它写的 1–9（题面里就是 10 档）。
 - **App 里「隐私政策」「开源仓库」两个按钮指本仓库。** jev-chat-jarvis v1.4 把它们指向 chatjevs.com 的隐私
@@ -184,7 +184,7 @@ Android `OverlayController` 的 `INTENT`/`NEEDS`/`ACTION`、macOS 的意图查�
   更新检查、Android 改掉那两个按钮是同一类事。**2026-09-26 之前发的 `macos-v0.1.0` 包里还带着这把 key。**
 - **`NOTICE` 是原版的加上这一版的。** jev-chat-jarvis-mac 从 2026-09-23 起有自己的 NOTICE，`macos/NOTICE`
   先原样带着它，后面接这一版改了什么。
-- **版本号从 `0.4.0` 退回 `0.1.0`；`torch` / `transformers` / `huggingface-hub` / `laya` 从依赖里删了**
+- **版本号不跟原版，自己从 `0.1.0` 起编**（现在 `0.2.0`，原版现在 `0.6.0`）；`torch` / `transformers` / `huggingface-hub` / `laya` 从依赖里删了**
   （本地模型没了，它们没人用）。`uv.lock` 是原版 0.6.0 那一份，还锁着这四个，版本号也对不上——没在 macOS 上重跑过
   `uv lock`，**这是个已知的不一致**。
 
