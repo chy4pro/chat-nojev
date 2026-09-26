@@ -12,14 +12,18 @@ both writes and rates the candidates, the `confidence` and `probabilities`
 values it returns are the model's own self-report and are not calibrated the
 way the upstream judgment model's were.
 
-Two things beyond the producer differ. The three choice questions are answered
+Three things beyond the producer differ. The three choice questions are answered
 with a short phrase in the language of the conversation instead of one of the
 fixed English keys, because a general model does not need a closed label set
 the way a classifier does; the keys and descriptions still frame the questions,
 but `app/overlay.py`'s table translating those keys into fixed Chinese display
 text (`_CHOICES`) has been removed and the panel shows the model's own wording.
-And the settings page has one model section instead of two, the judgment
-provider having no counterpart here.
+The settings page has one model section instead of two, the judgment
+provider having no counterpart here. And the model is asked to write its
+judgment before the candidates, so the candidates follow it: the one-call
+counterpart of the three-stage flow jev-chat-windows adopted in v0.1.10, where
+the judgment is fed to the drafting call as a separate step. The same ordering
+is used in `android/`.
 
 Everything else in `windows/` is the upstream Windows application.
 
@@ -100,12 +104,13 @@ Terms inherited from upstream
   is distributed, and the source must be credited, e.g. "Based on
   jev-chat-windows (https://github.com/jev-chat/jev-chat-windows)".
 - Do not use the names "jev-chat-windows", "Jev 聊天助手", "jev-chat" or the
-  chatjevs.com domain in a way that implies endorsement by the original
-  authors. This repository is not affiliated with them.
+  chatjevs.com and jev-jarvis.com domains in a way that implies endorsement by
+  the original authors. This repository is not affiliated with them.
 - `windows/NOTICE` carries the upstream third-party component list, including
   the PySide6-Fluent-Widgets GPLv3 terms that bind any built Windows release
   package. Those terms are unchanged here. `android/NOTICE` is jev-chat-jarvis's
   own NOTICE, copied verbatim.
-- jev-chat-jarvis-mac ships a LICENSE but no NOTICE, so `macos/NOTICE` is this
-  repository's own: it carries the upstream attribution and states what this
-  variant changed.
+- `macos/NOTICE` starts with jev-chat-jarvis-mac's own NOTICE (added upstream
+  on 2026-09-23), copied verbatim, followed by this repository's additions: the
+  attribution of the question set to jev-chat-jarvis, and what this variant
+  changed.

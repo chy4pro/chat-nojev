@@ -11,7 +11,7 @@
 [![Android](https://img.shields.io/badge/Android-11%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#android)
 [![macOS](https://img.shields.io/badge/macOS-13%2B-000000?style=flat-square&logo=apple&logoColor=white)](#macos)
 [![真机验证](https://img.shields.io/badge/%E7%9C%9F%E6%9C%BA%E9%AA%8C%E8%AF%81-%E6%97%A0-9e9e9e?style=flat-square)](#用之前要知道的)
-[![模型调用](https://img.shields.io/badge/%E6%A8%A1%E5%9E%8B%E8%B0%83%E7%94%A8-2%E2%80%933%20%E6%AC%A1%20%E2%86%92%201%20%E6%AC%A1-1f6feb?style=flat-square)](#改了什么)
+[![判断与排序调用](https://img.shields.io/badge/%E5%88%A4%E6%96%AD%E4%B8%8E%E6%8E%92%E5%BA%8F%E8%B0%83%E7%94%A8-2%20%E2%86%92%200-1f6feb?style=flat-square)](#改了什么)
 
 [![测试](https://img.shields.io/github/actions/workflow/status/chy4pro/chat-nojev/test.yml?branch=main&style=flat-square&label=%E6%B5%8B%E8%AF%95)](https://github.com/chy4pro/chat-nojev/actions/workflows/test.yml)
 
@@ -22,6 +22,8 @@
 ## 快速开始
 
 三个变体各发了 `v0.1.0`，由仓库自己的 workflow 在 GitHub 的 runner 上编译、打包、发布，**没有一个在真机上跑过**——装之前先看一眼[用之前要知道的](#用之前要知道的)。
+
+这三个包是 2026-09-22 建仓时的代码打的。2026-09-26 源码已经同步到 jev-chat 各自的最新版（jev-chat-windows v0.1.11、jev-chat-jarvis v1.4、jev-chat-jarvis-mac v0.6.0，对齐到哪个 commit 见 [`docs/UPSTREAM.md`](docs/UPSTREAM.md)），同步之后还没有发包；要新代码就从源码跑。
 
 ### Windows
 
@@ -46,6 +48,8 @@ python main.py          # 自己打包：build.bat 或 pyinstaller --noconfirm -
 
 装上之后：设置 →「接口」只有两张卡（模型 / 视觉），填「模型接口」一把 key 就能用，视觉留空自动继承它。权限还是原版那三项——无障碍、悬浮窗、自启动 + 省电无限制。
 
+**jev-chat-jarvis 从 v1.4 起不再支持微信**：微信 8.0.52+ 对无障碍服务隐藏了消息正文，最近又对部分账号开了防截屏，读正文和截屏识别两条路都断了。同步后的源码跟着它：适配的是 QQ / X / 飞书，其余 App 走悬浮球菜单里的「截屏识别一次」，进微信只弹一次提示。上面那个 `v0.1.0` 是同步前打的，还带着旧的微信读取，但在新版微信上它同样读不出正文。
+
 ```bash
 # 从源码打包
 cd android
@@ -56,7 +60,7 @@ cd android
 
 **[下载 macos-v0.1.0](https://github.com/chy4pro/chat-nojev/releases/tag/macos-v0.1.0)** —— `jev-jarvis-macos-v0.1.0.zip`（0.1 MB，同一个 Release 下还有别名 `jev-jarvis-macos-latest.zip` 和一份 `SHA256SUMS`；zip 这么小是因为它只是个启动器，首次运行再联网拉 Python 依赖，这是原版的设计）。**没有代码签名、也没有公证，Gatekeeper 第一次会拦下来**：右键（或按住 Control 点）→ 打开 → 再点一次「打开」；提示「已损坏」就 `xattr -d com.apple.quarantine /Applications/jev-jarvis.app`。构建 runner 是 Apple Silicon（arm64）。
 
-要求 macOS 13+，微信在运行，终端已授予「屏幕录制」；「填入」另需「辅助功能」。配置是一个 env 文件，只有一把 key：
+要求 macOS 13+，微信或 QQ 在运行（QQ 是 jev-chat-jarvis-mac v0.6.0 加的，`v0.1.0` 这个包里还没有），终端已授予「屏幕录制」；「填入」另需「辅助功能」。**`v0.1.0` 这个包还带着原版的内置共享 key**：一把 key 都不配时，聊天会发到 jev-chat-jarvis-mac 作者自建的中转（明文 HTTP）；按下面配了自己的 key 就不会走它。源码里已经留空了。配置是一个 env 文件，只有一把 key：
 
 ```bash
 # 配置；从源码跑见末尾一行
@@ -82,11 +86,13 @@ cd macos && ./start.command   # 从源码跑；自己打包：packaging/build_ap
 
 ## 改了什么
 
-原版的链路是两段：生成模型起草 3 条候选回复，专门的判断模型（TypeSafe Jev）回答对方的真实意图、紧张度、该不该马上回；macOS 上还要再来一次，让判断模型给候选打分排序。两路接口、两把 key。这一版只发一次请求：同一个模型写候选、答那几道判断题、给每条候选打分，一个 JSON 回来。题面原文、选项集合、0–9 的紧张度档位都是从原版原样搬过来的，**换的只是产出方**；悬浮窗读到的字段、类型和渲染那段代码一行没动。
+原版的链路是三次调用：专门的判断模型（Jev）回答对方的真实意图、紧张度、该不该马上回，生成模型起草候选回复，判断模型再给候选打分排序。两路接口、两把 key。这一版只发一次请求（macOS 是每个话术一次）：同一个模型答那几道判断题、写候选、给每条候选打分，一个 JSON 回来。题面原文、选项集合、0–9 的紧张度档位都是从原版原样搬过来的，**换的只是产出方**；悬浮窗读到的字段、类型和渲染那段代码一行没动。
+
+jev-chat-windows 从 v0.1.10 起先判断、再把判断当小抄喂给起草，候选是带着判断写的。这一版在 Windows 和 Android 上用同一次调用做到这件事：JSON 里 `judgment` 排在 `replies` 前面，模型先写下判断，候选跟着它写。macOS 的候选要边收边上屏，所以反过来，候选在前（[为什么](docs/MERGE.md#字段顺序)）。
 
 <div align="center">
 
-<img src="docs/images/flow.png" width="860" alt="jev-chat 两到三次调用、这一版一次调用，送到面板的是同一批字段" />
+<img src="docs/images/flow.png" width="860" alt="jev-chat 判断、起草、排序分三次调用，这一版一次调用，送到面板的是同一批字段" />
 
 </div>
 
@@ -104,11 +110,12 @@ bash   tools/equivalence_check_android.sh --upstream /path/to/jev-chat-jarvis --
 
 ## 和原版不一样的地方
 
-除了合并本身（删掉判断那一路的客户端、配置项和设置页那一节），三棵树跟上游还有这些出入。来龙去脉见 [`docs/MERGE.md`](docs/MERGE.md) 和各变体自己的 README。
+除了合并本身（删掉判断那一路的客户端、配置项和设置页那一节），三棵树跟原版还有这些出入。来龙去脉见 [`docs/MERGE.md`](docs/MERGE.md) 和各变体自己的 README。
 
 **三处都有**
 
 - 选择题的答案不再是一组固定的英文标签：模型用**对话那门语言**写一句短语，三张中文对照表跟着删了，面板显示它写的那句。这一条不是合并逼出来的，是有意选的（[为什么](docs/MERGE.md#判断会不会变差)）。数值完全不受影响。
+- 字段顺序：Windows、Android 是 `judgment` 在前，候选顺着判断写，对应 jev-chat-windows 的三段式；macOS 是 `replies` 在前，为了候选能边收边上屏（[为什么](docs/MERGE.md#字段顺序)）。
 
 **Windows**（[详版](docs/MERGE.md#windows)）
 
@@ -116,6 +123,7 @@ bash   tools/equivalence_check_android.sh --upstream /path/to/jev-chat-jarvis --
 - `max_tokens` 400 → 1600（思考模式 4000 → 5200）；`core/llm.py` 加了 JSON 模式，默认关着。
 - key 的回退改成认来源了——**修原版的毛病**：只设了 DeepSeek key 却选别家，原版会把 key 发给别家。代价是那种情况现在报「未配置」。
 - `docs/KICKOFF.md` 被就地改了；`docs/*.png` 截图没重拍，跟现在的面板对不上。
+- `probe/probe_laya*.py` 三个探针删了：它们只为「本地决策模型能不能替掉 Jev」那项调研存在，import 的排序题这里已经没有了。
 
 **Android**（[详版](docs/MERGE.md#android)）
 
@@ -123,6 +131,7 @@ bash   tools/equivalence_check_android.sh --upstream /path/to/jev-chat-jarvis --
 - 签名配置不再默认指向一个 Windows 路径——**修原版的 bug**，不修则非 Windows 机器上连未签名 release 都打不出来，也就没有那个 APK。
 - `gradlew` 补上了可执行位；版本号退回 `1` / `0.1.0`；`apk/` 目录没有跟着拷过来。
 - 顺带改对了原版 README 的一处笔误：危险等级是 0–9，不是 1–9。
+- App 里「隐私政策」和「开源仓库」两个按钮指本仓库，不指 chatjevs.com 和原版仓库（原版那页隐私政策写的是它的两路接口）；`PRIVACY.md` 按一次调用改写了。
 
 **macOS**（[详版](docs/MERGE.md#macos)）
 
@@ -130,7 +139,10 @@ bash   tools/equivalence_check_android.sh --upstream /path/to/jev-chat-jarvis --
 - 候选的百分比从「跨话术可比」变成「话术内占比」；面板实际用的排序没变。
 - 判断适配器里的兜底挪到了面板（`src/hud.py`），坏数据两边显示不同，5 处记在 `macos/docs/EQUIVALENCE.md`；顺带修掉 `float(value or 0.0)` 碰上非数字会带走 UI 线程的隐患。
 - 判断不再抢在候选前面上屏，「一半成功一半失败」也不再可能。
-- `MAX_TOKENS` 300 → 1200；版本号退回 `0.1.0`；`torch` / `transformers` / `huggingface-hub` / `laya` 从依赖删了，但 `uv.lock` 还锁着它们——**已知的不一致**。
+- 输出预算 300 → 900 + 150 × 每话术候选数（默认 2 条即 1200）；版本号退回 `0.1.0`；`torch` / `transformers` / `huggingface-hub` / `laya` 从依赖删了，但 `uv.lock` 是原版 0.6.0 那一份，还锁着它们——**已知的不一致**。
+- 原版「换话术」「重新生成」时会把上一次判断出的意图喂给生成；这一版候选写在判断前面，那两条路一律不带意图。
+- 原版给本地判断模型加的首次引导（选在线还是离线）、下载进度、国内镜像，跟着本地模型一起不存在。
+- 没有内置共享 key：原版打包时带着它作者那台中转的 token，不配 key 就走过去（明文 HTTP）；这一版留空，不配 key 就弹窗，聊天内容只发给你自己配的端点。
 
 ## jev-chat 与致谢
 
@@ -138,9 +150,9 @@ bash   tools/equivalence_check_android.sh --upstream /path/to/jev-chat-jarvis --
 
 - **[jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis)**（Jev 聊天助手，Android，最早的那一版；判断题面和分类体系出自这里）—— Finderchangchang 与 jev-chat 贡献者，`android/` 的直接来源
 - **[jev-chat-windows](https://github.com/jev-chat/jev-chat-windows)**（Jev 聊天助手 Windows 版）—— rezoch340 与 jev-chat 贡献者，`windows/` 的直接来源
-- **[jev-chat-jarvis-mac](https://github.com/jev-chat/jev-chat-jarvis-mac)**（macOS 版）—— eatmoreduck，`macos/` 的直接来源
+- **[jev-chat-jarvis-mac](https://github.com/jev-chat/jev-chat-jarvis-mac)**（macOS 版）—— eatmoreduck 与 jev-chat 贡献者，`macos/` 的直接来源
 
-分发或商用时请保留 LICENSE 与 [NOTICE](NOTICE) 并写明来源。本仓库与原作者没有任何关系，也**不要**用「Jev 聊天助手」「jev-chat」这些名字或 chatjevs.com 域名暗示由他们出品或背书。原版的第三方组件条款（包括 Windows 打包件会受约束的 PySide6-Fluent-Widgets GPLv3）原样保留在 `windows/NOTICE`。
+分发或商用时请保留 LICENSE 与 [NOTICE](NOTICE) 并写明来源。本仓库与原作者没有任何关系，也**不要**用「Jev 聊天助手」「jev-chat」这些名字或 chatjevs.com、jev-jarvis.com 域名暗示由他们出品或背书。原版的第三方组件条款（包括 Windows 打包件会受约束的 PySide6-Fluent-Widgets GPLv3）原样保留在 `windows/NOTICE`。
 
 ## 许可与免责
 
