@@ -112,7 +112,12 @@ object MergedAnswer {
      */
     fun replies(obj: JSONObject, content: String): List<String> {
         val raw = obj.optJSONArray("replies")
-        if (raw != null && raw.length() > 0) {
+        // An empty array is an answer, not a missing one: the object parsed and the
+        // model said "no replies". Falling through to parseThree here would scrape
+        // the judgment half of the same response for candidates — upstream's
+        // fallback only ever saw candidates, ours sees the whole merged object.
+        // Padding an empty list gives the same three cards upstream gives for `[]`.
+        if (raw != null) {
             val out = ArrayList<String>()
             // Trimmed and kept as they come, blanks included: upstream's reader
             // of the bare array did the same, and dropping one here would be

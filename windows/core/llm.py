@@ -31,7 +31,8 @@ def _turns(user_turns: list[str], assistant: str = "assistant") -> list[dict]:
 
 def chat(protocol: str, base_url: str | None, api_key: str, model: str, system: str,
          user_turns: list[str], *, temperature: float = 1.0, max_tokens: int = 400,
-         thinking: bool = False, extra_body: dict | None = None, timeout: float = 30,
+         thinking: bool = False, extra_body: dict | None = None,
+         headers: dict | None = None, timeout: float = 30,
          json_object: bool = False) -> str:
     """发一轮对话，返回模型输出的纯文本。
 
@@ -48,16 +49,17 @@ def chat(protocol: str, base_url: str | None, api_key: str, model: str, system: 
         return _gemini(base_url, api_key, model, system, user_turns,
                        temperature, max_tokens, thinking, timeout, json_object)
     return _openai(base_url, api_key, model, system, user_turns,
-                   temperature, max_tokens, extra_body, timeout, json_object)
+                   temperature, max_tokens, extra_body, headers, timeout, json_object)
 
 
 def _openai(base_url, api_key, model, system, user_turns, temperature, max_tokens,
-            extra_body, timeout, json_object=False) -> str:
+            extra_body, headers, timeout, json_object=False) -> str:
     import openai
 
     try:
         client = openai.OpenAI(base_url=base_url or None, api_key=api_key,
-                               timeout=timeout, max_retries=2)
+                               timeout=timeout, max_retries=2,
+                               **({"default_headers": headers} if headers else {}))
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "system", "content": system}] + _turns(user_turns),
@@ -120,7 +122,7 @@ def _gemini(base_url, api_key, model, system, user_turns, temperature, max_token
 
 
 def list_models(protocol: str, base_url: str | None, api_key: str,
-                timeout: float = 10) -> list[str]:
+                timeout: float = 10, headers: dict | None = None) -> list[str]:
     """某个地址上能用的模型 id，去重排序。失败抛 JevError，消息直接显示在设置页上。"""
     if protocol == "anthropic":
         import anthropic
@@ -143,7 +145,8 @@ def list_models(protocol: str, base_url: str | None, api_key: str,
 
         try:
             client = openai.OpenAI(base_url=base_url or None, api_key=api_key,
-                                   timeout=timeout, max_retries=1)
+                                   timeout=timeout, max_retries=1,
+                                   **({"default_headers": headers} if headers else {}))
             ids = [m.id for m in client.models.list()]
         except Exception as exc:
             _fail(exc, "取模型列表")
@@ -208,6 +211,13 @@ if __name__ == "__main__":
     assert "response_format" not in seen["openai.call"]
     chat("openai", "", "k", "m", "S", ["U"], json_object=True)
     assert seen["openai.call"]["response_format"] == {"type": "json_object"}
+    # 来源要求的额外头（OpenCode Go）要进 SDK，别的来源不带
+    chat("openai", "https://opencode.ai/zen/go/v1", "k", "deepseek-v4.1-flash", "S", ["U"],
+         headers={"x-opencode-session": "sid", "User-Agent": "jev-chat-windows"})
+    assert seen["openai.init"]["default_headers"] == {
+        "x-opencode-session": "sid", "User-Agent": "jev-chat-windows"}
+    chat("openai", "https://api.deepseek.com", "k", "m", "S", ["U"])
+    assert "default_headers" not in seen["openai.init"]
     # 追问补齐：user / assistant / user 三轮
     chat("openai", "", "k", "m", "S", ["U1", "A1", "U2"])
     assert [m["role"] for m in seen["openai.call"]["messages"]] == [
@@ -242,6 +252,9 @@ if __name__ == "__main__":
 
     # 列模型：去重排序；gemini 剥掉 models/ 前缀
     assert list_models("openai", "https://x/v1", "k") == ["a", "b"]
+    assert "default_headers" not in seen["openai.init"]
+    list_models("openai", "https://x/v1", "k", headers={"User-Agent": "jev-chat-windows"})
+    assert seen["openai.init"]["default_headers"] == {"User-Agent": "jev-chat-windows"}
     assert list_models("anthropic", "", "k") == ["claude-x", "claude-y"]
     assert list_models("gemini", "", "k") == ["gemini-1", "gemini-2"]
 

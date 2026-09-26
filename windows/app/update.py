@@ -49,6 +49,9 @@ def check_latest(current: str, timeout=6) -> tuple[str, str] | None:
 
 if __name__ == "__main__":
     # 自测：不碰网络，monkeypatch urlopen。跑法：python -m app.update
+    # 这一版 _REPO 是空的（更新检查关着），所以分两段测：
+    #   1. 关着的时候必须一个请求都不发、永远 None；
+    #   2. 把 _API 临时指上，原来那套比版本号的逻辑仍然对——将来填 _REPO 时它就是现成的。
     from io import BytesIO
     from unittest.mock import patch
 
@@ -63,6 +66,15 @@ if __name__ == "__main__":
     assert parse_version("1.2.3") == (1, 2, 3)
     assert parse_version("0.0.0-dev") is None
     assert parse_version("dev") is None
+
+    # 1. 关着：任何 current 都不查、不抛，_boom 证明连 urlopen 都没走到
+    assert _REPO == "" and _API == ""
+    with patch("urllib.request.urlopen", _boom):
+        assert check_latest("1.0.0") is None
+        assert check_latest("0.0.0-dev") is None
+
+    # 2. 临时开着：比版本号那套逻辑照旧
+    _API = "https://api.github.com/repos/owner/repo/releases/latest"  # 模块级重绑，check_latest 读的就是它
 
     with patch("urllib.request.urlopen", _fake({"tag_name": "v9.9.9", "html_url": "https://x/release"})):
         assert check_latest("1.0.0") == ("9.9.9", "https://x/release")  # 新版本 → 元组

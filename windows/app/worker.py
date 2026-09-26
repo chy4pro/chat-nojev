@@ -17,9 +17,23 @@ def _err(q):
     q.put(("status", " ".join(traceback.format_exc().split())[-200:]))
 
 
-def run(q, hwnd, enabled):
+def _packet(full, area, title, reader, lines):
+    """调试视图的一帧：整帧缩到长边 ≤1100 再走队列（原帧 2560 宽裸传要 20MB），只在内存里传，不落盘。
+    整数步长切片够用，不引新依赖；框和坐标照发原始值，画的那边按 scale 折算。"""
+    k = max(1, -(-max(full.shape[:2]) // 1100))
+    small = np.ascontiguousarray(full[::k, ::k])
+    return {"w": small.shape[1], "h": small.shape[0], "rgb": small.tobytes(), "scale": k,
+            "area": tuple(int(v) for v in area[:4]) if area else None,
+            "pane_top": int(area[5]) if area else 0, "title": title,
+            "boxes": reader.last_boxes if reader else [],
+            "lines": [(w, n, t) for w, n, t, _ in lines],
+            "ocr_ms": reader.last_ms if reader else 0, "ts": time.time()}
+
+
+def run(q, hwnd, enabled, debug_on):
     """enabled 置位=采集，清掉=暂停。暂停时停掉 WGC 会话（Windows 那圈黄色采集边框也跟着没了），
-    恢复时重开一个；readers 一直留着，去重状态不丢，恢复后不会把屏幕上的旧消息再报一遍。"""
+    恢复时重开一个；readers 一直留着，去重状态不丢，恢复后不会把屏幕上的旧消息再报一遍。
+    debug_on 置位才往队列里送整帧（一帧 2~3MB），关着一点额外活都不干。"""
     ctypes.windll.user32.SetProcessDPIAware()
     cap = None
     readers = {}  # {会话名: Reader}，一个会话一套去重状态
@@ -48,6 +62,7 @@ def run(q, hwnd, enabled):
             unminimize(hwnd)
             full = cap.settled()
             if full is not None:
+                reader, lines = None, []  # 调试视图要用，消息区没认出来时就是空的
                 area = chat_area(full)  # 每次停稳都重算：拖完窗口微信布局会晚一拍才铺好，只按尺寸变化算一次会锁死
                 if area is None:
                     if not warned:
@@ -73,13 +88,16 @@ def run(q, hwnd, enabled):
                             title = name
                             q.put(("chat", title))
                     reader = readers.setdefault(title, Reader())
-                    new = reader.new_lines(reader.read(full[y0:y1, x0:x1], bg))
+                    lines = reader.read(full[y0:y1, x0:x1], bg)
+                    new = reader.new_lines(lines)
                     if new:
                         q.put(("lines", title, new, rect))
+                if debug_on.is_set():
+                    q.put(("debug", _packet(full, area, title, reader, lines)))
         except Exception:
             _err(q)  # 一帧出错不退出
         time.sleep(0.05)
-    q.put(("dead", "采集停了（微信关了？）"))
+    q.put(("dead", "采集停了（聊天窗口关了？）"))
     try:
         cap.wait()  # 采集线程若是报错死的，这里把错抛出来
     except Exception:

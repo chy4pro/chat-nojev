@@ -31,7 +31,7 @@ from core import draft
 from core.engine import analyze
 from core.errors import redact_secrets
 from core.providers import LEGACY, LLM_ENV
-from core.questions import CHOICE_LABELS, JUDGE_QUESTIONS, SCORE_MAX
+from core.questions import CHOICE_OPTIONS, JUDGE_QUESTIONS, SCORE_MAX
 
 MESSAGES = [
     ("her", "你今天是不是又忘了我跟你说过什么？"),
@@ -107,7 +107,7 @@ def check_shape(result: dict, expect_cands: int) -> None:
     assert len(result["scores"]) == 3 and all(isinstance(s, float) for s in result["scores"])
     answers = result["answers"]
     # overlay._choice()：模型写的那句短语原样显示；缺了 / 空的 / 不是字符串才「暂未判断」
-    for name in CHOICE_LABELS:
+    for name in CHOICE_OPTIONS:
         raw = (answers.get(name) or {}).get("choice")
         text = render_choice(answers, name)
         expect = raw.strip() if isinstance(raw, str) and raw.strip() else "暂未判断"

@@ -257,8 +257,10 @@ RANK_INSTRUCTIONS = (
 
 REPLY_KEYS = ("reply_a", "reply_b", "reply_c")
 
-# 解析器要用的东西，全部从上面那张表派生——标签和档数只有 JUDGE_QUESTIONS 一份
-CHOICE_LABELS: dict = {name: tuple(q["criteria"])
+# 解析器要用的东西，全部从上面那张表派生——标签和档数只有 JUDGE_QUESTIONS 一份。
+# 名字别叫 CHOICE_LABELS：上游 033d6ef 起有一个同名的东西，装的是「英文 key → 中文显示」
+# （我们删掉的那张对照表）。同名不同义，合并时会被 git 悄悄并到一起，这里改名躲开。
+CHOICE_OPTIONS: dict = {name: tuple(q["criteria"])
                        for name, q in JUDGE_QUESTIONS.items() if q["type"] == "choice"}
 NOUL_FIELDS: tuple = tuple(name for name, q in JUDGE_QUESTIONS.items() if q["type"] == "noul")
 SCORE_MAX: dict = {name: len(q["criteria"]) - 1
@@ -316,8 +318,8 @@ def render_judgment_spec(questions: dict = JUDGE_QUESTIONS) -> str:
 
 if __name__ == "__main__":
     # ponytail: 纯文本，只查派生出来的东西跟表对得上，以及渲染没把判据吃掉。
-    assert CHOICE_LABELS["she_needs"] == ("apology", "action", "explanation", "care", "nothing")
-    assert set(CHOICE_LABELS) == {"true_intent", "best_action", "she_needs"}
+    assert CHOICE_OPTIONS["she_needs"] == ("apology", "action", "explanation", "care", "nothing")
+    assert set(CHOICE_OPTIONS) == {"true_intent", "best_action", "she_needs"}
     assert NOUL_FIELDS == ("literal_question", "should_reply_now", "tension_resolved")
     assert SCORE_MAX == {"danger_level": 9}
     spec = render_judgment_spec()
@@ -327,7 +329,7 @@ if __name__ == "__main__":
     assert "  9: Active rupture" in spec and "  0: Light chat or joking" in spec
     assert "integer 0..9" in spec
     # choice 那三道题各带一份「用对话那门语言写一句短语」的说明，别的题型不带
-    assert spec.count("Never answer with the English key.") == len(CHOICE_LABELS) == 3
+    assert spec.count("Never answer with the English key.") == len(CHOICE_OPTIONS) == 3
     assert RANK_INSTRUCTIONS.split(".")[0] in spec
     state = build_state([("her", "在吗"), ("me", "在", None)], "friends")
     assert state["chat"]["latest_from"] == "me" and state["chat"]["is_group"] is False

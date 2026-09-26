@@ -173,7 +173,12 @@ val SCENARIOS = listOf(
         nounBare = true),
     Scn("score_legend_from_api", "jev-chat-jarvis 那边带 legend（接口就是这么回的），我们没有：档数必须一样", C3, "reply_b",
         mapOf("reply_a" to 0.25, "reply_b" to 0.55, "reply_c" to 0.20),
-        legend = true)
+        legend = true),
+    // 注入过滤可以把候选全扔掉。上游那边起草那次调用的正文只有候选，抠不出来就是抠不出来；
+    // 合并之后同一段文本里还躺着判断，逐行兜底会把 JSON 自己的花括号当候选抠出来。
+    // Windows 那棵树就是这么中招的（已修），这里盯着 Android 别走上同一条路。
+    Scn("all_candidates_filtered_out", "候选被过滤光：兜底不许把判断那段文本当候选抠出来", emptyList(), "reply_b",
+        mapOf("reply_a" to 0.3, "reply_b" to 0.5, "reply_c" to 0.2))
 )
 
 // ---------------------------------------------------------------------------

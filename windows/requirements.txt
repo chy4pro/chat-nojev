@@ -1,5 +1,5 @@
 # ASCII only: pip on Chinese Windows decodes this file as GBK and chokes on UTF-8 comments.
-rapidocr-onnxruntime>=1.4,<2  # offline Chinese OCR; 1.2.x rejects det_limit_* ctor args and 1.4.x has no text_detector attr, so pin 1.4
+rapidocr-onnxruntime>=1.4,<2  # offline Chinese OCR; 1.2.x rejects det_limit_* ctor args and 1.4.x has no text_detector attr, so pin 1.4; all 1.4.x require Python <3.13 - on 3.13+ pip silently falls back to 1.2.3 (KeyError at startup)
 numpy                         # frames are numpy arrays; chat-area detection is all numpy
 windows-capture               # Windows Graphics Capture, captures GPU-composited windows
 PySide6-Fluent-Widgets        # overlay UI (pulls in PySide6)

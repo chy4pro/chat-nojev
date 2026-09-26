@@ -350,6 +350,22 @@ class OverlayController(private val ctx: Context) {
     }
 
     /**
+     * A neutral one-time notice (used when the foreground is WeChat, which is
+     * fully disabled). Not framed as an error: shows the bubble, drops any stale
+     * judgment from the previous chat, puts the message in the panel and opens it
+     * once so the user actually reads it. Never auto-dismisses (unlike a toast)
+     * and never takes input focus (the overlay window is FLAG_NOT_FOCUSABLE).
+     */
+    fun showNotice(msg: String) {
+        ensureRoot(); bubble?.alpha = 1f
+        resetForNewConversation()
+        setContent(listOf(
+            line("提示", "#3A7AFE", 14f, true),
+            hint(msg)))
+        if (!expanded) toggle()
+    }
+
+    /**
      * One analysis, one render. Upstream showed the judgment first (its
      * judgment call was the fast one) with the reply cards still saying
      * "生成中…", then filled them in when the second call came back. One call

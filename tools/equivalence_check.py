@@ -172,6 +172,12 @@ SCENARIOS = [
                  true_intent={"choice": "vent_anger",
                               "probabilities": {"vent_anger": 0.62, "casual_chat": 0.38}},
                  danger_level={"score": 4, "probabilities": {"4": 0.7, "5": 0.3}})),
+    # 注入过滤（「忽略上面的规则」之类）可以把三条候选全扔掉。上游 3dda58e 之前会在
+    # candidates[0] 上 IndexError，现在抛 JevError；我们这边候选是从合并那个 JSON 里解出来的,
+    # 解出 0 条也要走到同一个出口，抛同一句话——不是返回一个 best_index=0 的空结果。
+    scenario("all_candidates_filtered_out", [], "reply_b",
+             {"reply_a": 0.3, "reply_b": 0.5, "reply_c": 0.2},
+             "候选被过滤光：两边都必须抛 JevError，抛的还是同一句"),
 ]
 
 
@@ -270,7 +276,10 @@ def run_upstream(tree: str) -> dict:
         # 顺手把原模块上的也换掉，谁也别摸网络。
         draft_mod.draft_candidates = engine.draft_candidates = fake_draft
         jev_mod.ask = engine.ask = fake_ask
-        result = engine.analyze(scn["messages"], "朋友", reply_to=scn["reply_to"])
+        try:
+            result = engine.analyze(scn["messages"], "朋友", reply_to=scn["reply_to"])
+        except jev_mod.JevError as exc:   # 候选被过滤光是 analyze 的合法出口，不是崩
+            result = {"raised": str(exc)}
         out[scn["name"]] = {"result": result, "calls": seen}
     return out
 
@@ -301,7 +310,10 @@ def run_ours(tree: str) -> dict:
             raise JevError("stub: 追问不参与这次比对")
 
         draft_mod.chat = fake_chat
-        result = engine.analyze(scn["messages"], "朋友", reply_to=scn["reply_to"])
+        try:
+            result = engine.analyze(scn["messages"], "朋友", reply_to=scn["reply_to"])
+        except JevError as exc:           # 同上：两边必须抛出同一句话
+            result = {"raised": str(exc)}
         out[scn["name"]] = {"result": result, "calls": seen}
     return out
 

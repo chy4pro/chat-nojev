@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
-"""浅色置顶回复助手：回复建议和独立设置页。发送始终由用户在微信确认。"""
+"""浅色置顶回复助手：回复建议和独立设置页。发送始终由用户确认。"""
+import os
+import sys
 import threading
 from datetime import datetime
 from math import isfinite
 from types import SimpleNamespace
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QSizeGrip, QSizePolicy, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel, CardWidget, CheckBox, ComboBox, EditableComboBox, FluentIcon as FIF,
@@ -40,6 +42,74 @@ def _choice(answers, name):
     语言跟着对话走。没给、空的、不是字符串（不能递给 setText）才显示「暂未判断」。"""
     value = (answers.get(name) or {}).get("choice")
     return value.strip() if isinstance(value, str) and value.strip() else "暂未判断"
+
+
+def _mp_banner_path() -> str:
+    """打包后在 _MEIPASS/docs，源码跑在仓库 docs/。"""
+    root = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(root, "docs", "wechat-mp.png")
+
+
+class _MpBanner(QLabel):
+    """公众号长条横幅，宽度跟着设置页走，高度按原图比例。"""
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self._src = QPixmap(path)
+        self._shown = 0
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        if self._src.isNull() or w <= 0 or self._src.width() <= 0:
+            return 0
+        return max(1, round(w * self._src.height() / self._src.width()))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        w = self.width()
+        if w <= 0 or w == self._shown or self._src.isNull():
+            return
+        h = self.heightForWidth(w)
+        self._shown = w
+        self.setPixmap(self._src.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        if self.height() != h:
+            self.setFixedHeight(h)
+
+
+class _FitCombo(ComboBox):
+    """长名字不撑开窄布局。按钮上按当前宽度省略；条目仍是全文，findText 靠它。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def setText(self, text):
+        self._full = text or ""
+        QPushButton.setText(self, self._elide(self._full))
+        if self._full and self.text() != self._full:
+            self.setToolTip(self._full)
+
+    def minimumSizeHint(self):
+        hint = QPushButton.minimumSizeHint(self)
+        return QSize(48, hint.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        shown = self._elide(self._full)
+        if shown != self.text():
+            QPushButton.setText(self, shown)
+        if self._full and shown != self._full:
+            self.setToolTip(self._full)
+
+    def _elide(self, text):
+        # 右侧箭头大约 28px。还没排上版时先按一个窄宽度省略，避免最小宽度被整句名字撑开。
+        avail = self.width() - 36 if self.width() > 64 else 120
+        return self.fontMetrics().elidedText(text, Qt.ElideRight, max(24, avail))
 
 
 def _label(text="", size=14, color=None, bold=False, parent=None):
@@ -139,8 +209,8 @@ class _ReplyCard(_Surface):
         box.addWidget(self.text)
         bottom = QHBoxLayout()
         bottom.addStretch(1)
-        self.fillButton = (PrimaryPushButton if recommended else PushButton)("填入微信", self)
-        self.fillButton.setAccessibleName(f"填入{'推荐回复' if recommended else f'备选 {number}'}到微信")
+        self.fillButton = (PrimaryPushButton if recommended else PushButton)("填入", self)
+        self.fillButton.setAccessibleName(f"填入{'推荐回复' if recommended else f'备选 {number}'}")
         self.fillButton.clicked.connect(lambda: owner._fill(index))
         bottom.addWidget(self.fillButton)
         box.addLayout(bottom)
@@ -156,15 +226,18 @@ class _ReplyCard(_Surface):
 
 
 class Overlay:
-    def __init__(self, on_fill, on_toggle_capture=None, on_target_change=None, result_of=None):
+    def __init__(self, on_fill, on_toggle_capture=None, on_target_change=None, result_of=None,
+                 on_toggle_debug=None):
         """result_of(会话名) → 那个会话上次的结果或 None；切着看别的会话时用它把旧结果放回来。
-        on_target_change(会话名, 人名) → 用户在群里挑了回复对象。"""
+        on_target_change(会话名, 人名) → 用户在群里挑了回复对象。
+        on_toggle_debug(开不开) → 开关调试视图那个独立窗口。"""
         self.app = QApplication.instance() or QApplication([])
         setTheme(Theme.LIGHT)
         setThemeColor(_GREEN, save=False)
         self.on_fill = on_fill
         self.on_toggle_capture = on_toggle_capture
         self.on_target_change = on_target_change
+        self.on_toggle_debug = on_toggle_debug
         self.result_of = result_of
         self.cands = []
         self.cards = []
@@ -181,7 +254,7 @@ class Overlay:
         self._shown = ""  # 界面上正在看的会话（浏览时和上面不一样）
         self.win = _MainWindow(self._relayout)
         self.win.setObjectName("assistantWindow")
-        self.win.setWindowTitle("Jev · 微信回复助手")
+        self.win.setWindowTitle("JevChat-Windows")
         self.win.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.win.setStyleSheet(
             "QWidget#assistantWindow { background: #f5f7f6; border: 1px solid #dce3de; border-radius: 14px; }"
@@ -199,14 +272,14 @@ class Overlay:
         name.setFixedWidth(40)
         name.setAttribute(Qt.WA_TransparentForMouseEvents)
         title.addWidget(name)
-        self.subtitle = _label("微信回复助手", 12, _MUTED)
+        self.subtitle = _label("JevChat-Windows", 12, _MUTED)
         self.subtitle.setAttribute(Qt.WA_TransparentForMouseEvents)
         title.addWidget(self.subtitle, 1)
         self.captureSwitch = SwitchButton(header)
         self.captureSwitch.setOnText("采集中")
         self.captureSwitch.setOffText("已暂停")
-        self.captureSwitch.setToolTip("开启或暂停微信采集")
-        self.captureSwitch.setAccessibleName("开启或暂停微信采集")
+        self.captureSwitch.setToolTip("开启或暂停采集")
+        self.captureSwitch.setAccessibleName("开启或暂停采集")
         self.captureSwitch.setChecked(True)
         self.captureSwitch.checkedChanged.connect(self._capture_toggled)
         title.addWidget(self.captureSwitch)
@@ -307,11 +380,10 @@ class Overlay:
         prefix = _label("当前会话", 12, _MUTED)
         prefix.setFixedWidth(56)
         chat_row.addWidget(prefix)
-        self.chatBox = ComboBox()
-        self.chatBox.setMinimumWidth(0)  # 别让会话名的长度撑开整行，宽度交给 stretch
+        self.chatBox = _FitCombo()
         self.chatBox.setPlaceholderText("尚未识别到会话")
         self.chatBox.setAccessibleName("当前会话")
-        self.chatBox.setToolTip("微信切到哪个会话这里就跟到哪个；也可以自己选一个，只看它的记录和建议")
+        self.chatBox.setToolTip("聊天窗口切到哪个会话这里就跟到哪个；也可以自己选一个，只看它的记录和建议")
         self.chatBox.currentIndexChanged.connect(self._on_chat_selected)
         chat_row.addWidget(self.chatBox, 1)
         self.chatFollow = _label("", 11, _MUTED)
@@ -326,15 +398,14 @@ class Overlay:
         target_prefix = _label("回复对象", 12, _MUTED)
         target_prefix.setFixedWidth(56)
         target_row.addWidget(target_prefix)
-        self.targetBox = ComboBox()
-        self.targetBox.setMinimumWidth(0)  # 人名长度不定，别让它撑开整行
+        self.targetBox = _FitCombo()
         self.targetBox.setAccessibleName("回复对象")
         self.targetBox.setToolTip("三条候选都按这个人来写；不选就跟着最近说话的那位")
         self.targetBox.currentIndexChanged.connect(self._on_target_selected)
         target_row.addWidget(self.targetBox, 1)
         self.atCheck = CheckBox("填入时带 @")
         self.atCheck.setChecked(True)
-        self.atCheck.setToolTip("填入时在开头加「@名字 」。只是普通文字，微信不会认成真正的 @")
+        self.atCheck.setToolTip("填入时在开头加「@名字 」。只是普通文字，不会变成真正的 @")
         target_row.addWidget(self.atCheck)
         self.targetRow.hide()
         body.addWidget(self.targetRow)
@@ -384,7 +455,7 @@ class Overlay:
         self.emptyTitle = _label("等待对方的新消息", 17, "#304c3c", True)
         self.emptyTitle.setAlignment(Qt.AlignCenter)
         empty_box.addWidget(self.emptyTitle)
-        self.emptyHint = _label("保持微信聊天窗口打开。\n收到新消息后，回复建议会出现在这里。", 13, _MUTED)
+        self.emptyHint = _label("保持聊天窗口打开。\n收到新消息后，回复建议会出现在这里。", 13, _MUTED)
         self.emptyHint.setAlignment(Qt.AlignCenter)
         empty_box.addWidget(self.emptyHint)
         self.setupButton = PrimaryPushButton("前往设置")
@@ -484,6 +555,19 @@ class Overlay:
         box.addWidget(self._hint(
             "只向 GitHub 查最新版本号，不发送任何数据。国内访问 GitHub 慢的话关掉也行。"
         ))
+        debug_row = QHBoxLayout()
+        debug_row.addWidget(_label("调试视图", 13), 1)
+        self.debugSwitch = SwitchButton()
+        self.debugSwitch.setOnText("开")
+        self.debugSwitch.setOffText("关")
+        self.debugSwitch.setAccessibleName("调试视图")
+        self.debugSwitch.checkedChanged.connect(self._debug_toggled)  # 这个开关立刻生效，不等「保存设置」
+        debug_row.addWidget(self.debugSwitch)
+        box.addLayout(debug_row)
+        box.addWidget(self._hint(
+            "另开一个窗口实时显示截到的画面和识别框：绿 = 我、蓝 = 对方、灰 = 过滤掉的灰字、"
+            "红 = 当成图片丢掉、黄 = 小字丢掉。只在内存里画，不存图。"
+        ))
         body.addWidget(preference)
 
         models = _Surface()
@@ -525,6 +609,9 @@ class Overlay:
         actions.addWidget(self.saveButton)
         body.addLayout(actions)
         body.addWidget(self._hint("保存后用于下一次生成的回复。"))
+        banner = _mp_banner_path()
+        if os.path.exists(banner):
+            body.addWidget(_MpBanner(banner))
         body.addStretch(1)
         self._load_settings()
 
@@ -643,7 +730,9 @@ class Overlay:
         """后台线程：按协议走 llm；失败把原因一起送回主线程。"""
         try:
             spec = providers.DRAFT_PROVIDERS[provider]
-            models = llm.list_models(spec.protocol, base or spec.base, key)
+            models = llm.list_models(spec.protocol, base or spec.base, key, headers=spec.headers)
+            if spec.keep:  # 目录里混了别的协议时，只留这条路打得通的
+                models = [m for m in models if spec.keep(m)]
             reason = "" if models else "这个来源没返回任何模型"
         except Exception as exc:  # 线程里漏异常会静默吞掉，按钮就永远停在禁用态
             models, reason = [], str(exc)[:120]
@@ -688,6 +777,7 @@ class Overlay:
         self.baseEdit.setText(settings.draft_base_url())
         self.thinkingSwitch.setChecked(settings.thinking())
         self.updateSwitch.setChecked(settings.check_update())
+        self.set_debug_switch(settings.debug_view())  # 屏蔽信号地拨，别在加载时开关一遍窗口
         self._sync_model_fields()  # 上面屏蔽了信号，这里补一次
         self.settingsFeedback.hide()
 
@@ -735,6 +825,18 @@ class Overlay:
             self._empty_text()
             self.set_status("设置已就绪，等待新消息", "idle")
 
+    def _debug_toggled(self, on):
+        """调试视图独立于「保存设置」：拨一下就开窗/收窗，顺手落盘，重启还在。"""
+        settings.save(debug_view_on=on)
+        if self.on_toggle_debug:
+            self.on_toggle_debug(on)
+
+    def set_debug_switch(self, on):
+        """调试窗被用户直接关掉时把开关拨回去；屏蔽信号，免得又回调一圈。"""
+        self.debugSwitch.blockSignals(True)
+        self.debugSwitch.setChecked(on)
+        self.debugSwitch.blockSignals(False)
+
     def _settings_feedback(self, text, error=False):
         color = "#b44832" if error else _GREEN
         qss = f"BodyLabel {{ color: {color}; background: transparent; }}"
@@ -762,17 +864,17 @@ class Overlay:
         except Exception as e:
             # 状态栏保持友好文案；真实原因和压缩堆栈进聊天记录，认得出是哪一步炸的
             import traceback
-            self.set_status("未能填入，请确认微信窗口可用后重试，或复制回复。", "error")
+            self.set_status("未能填入，请确认聊天窗口可用后重试，或复制回复。", "error")
             self.log(f"[填入失败] {type(e).__name__}: {e}")
             self.log(f"[填入失败堆栈] {' '.join(traceback.format_exc().split())[:300]}")
             return
-        self.set_status("已尝试填入，请在微信确认内容后发送。", "success")
+        self.set_status("已尝试填入，请确认内容后发送。", "success")
 
     def _copy(self, index):
         if self._busy or not self._current or index >= len(self.cands):
             return
         self.app.clipboard().setText(self.cands[index])
-        self.set_status("回复已复制，可在微信中粘贴并修改。", "success")
+        self.set_status("回复已复制，可粘贴并修改。", "success")
 
     def _capture_toggled(self, on):
         """用户自己拨的开关：界面先改，再通知父进程去开/停采集。"""
@@ -797,7 +899,7 @@ class Overlay:
         """开关状态对应的状态行和空态文案。已有的候选不受影响，暂停了照样能填入/复制。"""
         configured = settings.has_key()
         if not on:
-            self.set_status(reason or "采集已暂停，微信内容不再读取", "warning")
+            self.set_status(reason or "采集已暂停，聊天内容不再读取", "warning")
         elif configured:
             self.set_status("等待新消息", "idle")
         else:
@@ -806,7 +908,7 @@ class Overlay:
             return
         if not on:
             self.emptyTitle.setText("采集已暂停")
-            self.emptyHint.setText("微信里的内容暂时不再读取。\n打开标题栏的开关，继续接收新消息。")
+            self.emptyHint.setText("聊天内容暂时不再读取。\n打开标题栏的开关，继续接收新消息。")
             self.setupButton.setVisible(not configured)
         else:
             self._empty_text()
@@ -833,7 +935,7 @@ class Overlay:
         """空态卡片的默认文案，配好没配好两套说法。"""
         configured = settings.has_key()
         self.emptyTitle.setText("等待对方的新消息" if configured else "先设置，再开始")
-        self.emptyHint.setText("保持微信聊天窗口打开。\n收到新消息后，回复建议会出现在这里。"
+        self.emptyHint.setText("保持聊天窗口打开。\n收到新消息后，回复建议会出现在这里。"
                                if configured else "配置模型和关系背景，\n让建议更贴近你们的对话。")
         self.setupButton.setVisible(not configured)
 
@@ -983,7 +1085,7 @@ class Overlay:
         return self.atCheck.isChecked()
 
     def _follow_text(self):
-        self.chatFollow.setText(("跟随微信" if self._shown == self._chat else "浏览中") if self._chat else "")
+        self.chatFollow.setText(("跟随" if self._shown == self._chat else "浏览中") if self._chat else "")
 
     def show_cached(self, result):
         """把某个会话上次的结果放回界面；没有就回到空态。浏览别的会话时只给看不给填——
@@ -1000,7 +1102,7 @@ class Overlay:
             self._empty_text()
         if self._shown != self._chat:
             self.invalidate_replies()
-            self.set_status(f"正在浏览「{self._shown}」，只看不填；微信切回它才能用。")
+            self.set_status(f"正在浏览「{self._shown}」，只看不填；切回这个会话才能用。")
 
     def show(self, result):
         """按推荐顺序展示，按钮始终绑定 candidates 的原始索引。"""

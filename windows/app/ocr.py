@@ -2,6 +2,7 @@
 """消息区截图 → 谁说了什么。RapidOCR 吃 numpy，不落盘。"""
 import difflib
 import re
+import time
 
 import numpy as np
 from rapidocr_onnxruntime import RapidOCR
@@ -74,10 +75,16 @@ class Reader:
         self.ocr = _engine()
         self.lh = None  # 正常气泡字高，头一帧定
         self.seen = []  # [(who, name, text)]，累计，封顶 500
+        self.last_boxes = []  # 调试视图用：[(x0,y0,x1,y1,kind,text)]，消息区裁剪坐标
+        self.last_ms = 0  # 上一帧 OCR 耗时
 
     def read(self, chat, pane_bg):
-        """→ [(who, name, text, y)]，同一气泡的多行已合并。who ∈ me/her；name 群聊里是发言人，单聊 None。"""
+        """→ [(who, name, text, y)]，同一气泡的多行已合并。who ∈ me/her；name 群聊里是发言人，单聊 None。
+        顺带把每个框的分类记进 self.last_boxes（调试视图画框用，几十个 tuple，不开也不亏）。"""
+        t0 = time.perf_counter()
         res, _ = self.ocr(chat, use_cls=False)
+        self.last_ms = int((time.perf_counter() - t0) * 1000)
+        self.last_boxes = []
         W = chat.shape[1]
         # 群聊：每条 her 气泡上方一行灰色发言人名（靠左、短、不带冒号、印在面板底色上），从上往下扫，名字带给后面的气泡。
         # 引用块/时间戳/公告带冒号，链接卡片灰字印在气泡底色上，都不会被当成名字。
@@ -85,13 +92,21 @@ class Reader:
         name, raw = None, []
         for box, text, _ in sorted(res or [], key=lambda r: r[0][0][1]):
             kind, bg, h = who_said(chat, box)
+            xs, ys = [p[0] for p in box], [p[1] for p in box]
+            rect = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
             if kind == "gray":
                 on_pane = np.abs(bg - pane_bg).sum() <= 6
-                if on_pane and box[0][0] < 0.25 * W and len(text) <= 16 and not re.search("[:：]", text):
+                taken = bool(on_pane and box[0][0] < 0.25 * W and len(text) <= 16
+                             and not re.search("[:：]", text))
+                if taken:
                     name = text
+                self.last_boxes.append(rect + ("name" if taken else "gray", text))
                 continue
             if kind is None or (self.lh and h < 0.6 * self.lh):
-                continue  # 字比正常气泡小得多 = 图片消息（截图/表情包）里的字，不是气泡
+                # 字比正常气泡小得多 = 图片消息（截图/表情包）里的字，不是气泡
+                self.last_boxes.append(rect + ("image" if kind is None else "tiny", text))
+                continue
+            self.last_boxes.append(rect + (kind, text))
             raw.append((kind, name if kind == "her" else None, text, box[0][1], box[2][1], h))
         if not self.lh and len(raw) >= 3:
             self.lh = float(np.median([r[5] for r in raw]))

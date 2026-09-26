@@ -8,8 +8,10 @@ from __future__ import annotations
 
 try:
     from .draft import draft_and_judge
+    from .errors import JevError
 except ImportError:
     from draft import draft_and_judge
+    from errors import JevError
 
 _REPLY_IDX = {"reply_a": 0, "reply_b": 1, "reply_c": 2}
 
@@ -35,6 +37,8 @@ def analyze(messages: list, relationship: str, model: str | None = None,
                              base_url=base_url, timeout=timeout, keep=context,
                              reply_to=reply_to, style=style, thinking=thinking)
     candidates = result["candidates"]
+    if not candidates:  # 注入过滤可以把起草结果全扔掉；接着取 [0] 会 IndexError
+        raise JevError("起草结果没有可用候选回复")
 
     answers = result.get("answers") or {}
     best_key = (answers.get("best_reply") or {}).get("choice")
@@ -59,3 +63,17 @@ def analyze(messages: list, relationship: str, model: str | None = None,
         "usage": result.get("usage") or {},
         "reply_to": reply_to,
     }
+
+
+if __name__ == "__main__":
+    # 候选被过滤光时要抛 JevError，不能在取第一条时 IndexError。
+    from unittest.mock import patch
+
+    with patch("__main__.draft_and_judge",
+               return_value={"candidates": [], "answers": {}, "usage": {}}):
+        try:
+            analyze([("her", "hello")], "friends")
+            raise SystemExit("应当抛错")
+        except JevError as e:
+            assert "没有可用候选" in str(e)
+    print("engine ok")

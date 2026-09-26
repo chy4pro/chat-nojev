@@ -16,7 +16,49 @@ from unittest.mock import patch
 from app import settings
 
 
-_STATES = ("ready", "waiting", "loading", "error", "setup", "settings", "paused")
+_STATES = ("ready", "waiting", "loading", "error", "setup", "settings", "paused", "debug")
+
+# 调试视图预览用的真微信截图（只读进内存，不改不存）；没有就退一张空画面
+_FRAME = Path("/private/tmp/claude-501/-Users-lpitiless-Documents-project-wechatjev"
+              "/26954c2b-b4b9-432e-bad7-0d0b803e4309/images/9.png")
+_AREA = (433, 152, 1298, 767)  # 那张图里的消息区，头部从 y=40 起
+# 消息区裁剪坐标的框：前面这些是真跑一遍 OCR 得到的，灰字/小字那两个是手摆的，凑齐六种颜色
+_BOXES = [
+    (83, 99, 156, 122, "name", "Asterlion"),
+    (26, 131, 70, 146, "image", "借仲夏夜之梦"),
+    (99, 136, 143, 162, "her", "难绷"),
+    (83, 194, 156, 218, "name", "Asterlion"),
+    (101, 233, 315, 256, "her", "怎么识别到仲夏夜之梦的（"),
+    (612, 30, 700, 44, "gray", "链接卡片的灰字"),
+    (612, 50, 690, 62, "tiny", "表情包里的小字"),
+    (633, 298, 760, 328, "me", "好像识别头像了"),
+    (685, 368, 762, 399, "me", "笑死我了"),
+    (85, 432, 157, 454, "name", "Asterlion"),
+    (27, 464, 70, 478, "image", "借仲夏夜之梦"),
+    (99, 467, 159, 493, "her", "还真是"),
+    (98, 563, 160, 592, "her", "哈哈哈"),
+]
+_LINES = [("her", "Asterlion", "难绷"), ("her", "Asterlion", "怎么识别到仲夏夜之梦的（"),
+          ("me", None, "好像识别头像了"), ("me", None, "笑死我了"),
+          ("her", "Asterlion", "还真是"), ("her", "Asterlion", "哈哈哈")]
+
+
+def _debug_packet():
+    """合成一份子进程会发的调试包。QImage 读 PNG 进内存取 RGB 裸字节（行有 4 字节对齐，按行裁）。"""
+    import time
+
+    from PySide6.QtGui import QImage
+
+    img = QImage(str(_FRAME)) if _FRAME.exists() else QImage()
+    if img.isNull():
+        img = QImage(1303, 979, QImage.Format_RGB888)
+        img.fill(0x202524)
+    img = img.convertToFormat(QImage.Format_RGB888)
+    w, h = img.width(), img.height()
+    rgb = b"".join(bytes(img.constScanLine(y))[:w * 3] for y in range(h))
+    return {"w": w, "h": h, "rgb": rgb, "scale": 1, "area": _AREA, "pane_top": 40,
+            "title": "白金搬砖小分队", "boxes": _BOXES, "lines": _LINES,
+            "ocr_ms": 261, "ts": time.time()}
 
 _CHAT = "白金搬砖小分队"  # 演示里「微信当前开着的」会话：用群聊，回复对象那一行才看得见
 # (会话, 谁, 内容, 群里的发言人, 时间)：两个会话，下拉框里都能看到
@@ -88,13 +130,15 @@ def main() -> int:
                      "llm_key": configured,
                      "draft_provider": "deepseek", "draft_model": "deepseek-flash",
                      "draft_base_url": "", "reply_target": True,
-                     "style": "话少，基本不用标点，急了才发感叹号", "thinking": False, "check_update": True}
+                     "style": "话少，基本不用标点，急了才发感叹号", "thinking": False,
+                     "check_update": True, "debug_view": args.state == "debug"}
 
-    def save_demo_settings(relationship_text, context_n=None, *, draft_provider_text=None,
+    def save_demo_settings(relationship_text=None, context_n=None, *, draft_provider_text=None,
                            llm_key_text=None, draft_model_text=None, draft_base_url_text=None,
                            reply_target_on=None, style_text=None, thinking_on=None,
-                           check_update_on=None):
-        demo_settings["relationship"] = relationship_text
+                           check_update_on=None, debug_view_on=None):
+        if relationship_text:
+            demo_settings["relationship"] = relationship_text
         if context_n is not None:
             demo_settings["context"] = context_n
         for name, value in (("draft_provider", draft_provider_text),
@@ -105,7 +149,7 @@ def main() -> int:
         if llm_key_text:
             demo_settings["llm_key"] = llm_key_text
         for name, value in (("reply_target", reply_target_on), ("thinking", thinking_on),
-                            ("check_update", check_update_on)):
+                            ("check_update", check_update_on), ("debug_view", debug_view_on)):
             if value is not None:
                 demo_settings[name] = bool(value)
 
@@ -130,6 +174,7 @@ def main() -> int:
         style=lambda: demo_settings["style"],
         thinking=lambda: demo_settings["thinking"],
         check_update=lambda: demo_settings["check_update"],
+        debug_view=lambda: demo_settings["debug_view"],
         save=save_demo_settings,
     ):
         from PySide6.QtCore import QTimer
@@ -143,9 +188,18 @@ def main() -> int:
 
         # 只有当前会话有结果，切到另一个会话就是空态——跟真实情况一致
         ov = Overlay(on_fill=simulate_fill, result_of=lambda t: _RESULT if t == _CHAT else None)
-        ov.win.setWindowTitle("WeChatJev · 界面演示（合成数据）")
+        ov.win.setWindowTitle("JevChat-Windows · 界面演示（合成数据）")
+        shot = ov.win  # 截图截哪个窗口；调试预览截调试窗
 
-        if args.state == "setup":
+        if args.state == "debug":
+            from app.debugwin import DebugWindow
+
+            dbg = DebugWindow(on_close=lambda: ov.set_debug_switch(False))
+            dbg.setWindowTitle("识别调试 · 界面演示（合成数据）")
+            dbg.show_packet(_debug_packet())
+            dbg.show()
+            shot = dbg
+        elif args.state == "setup":
             ov.set_status("演示模式：请填写示例密钥，设置仅保存在本次预览内。", kind="warning")
             ov.open_settings()
         elif args.state == "waiting":
@@ -175,7 +229,7 @@ def main() -> int:
                 nonlocal exit_code
                 try:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    if not ov.win.grab().save(str(target), "PNG"):
+                    if not shot.grab().save(str(target), "PNG"):
                         raise OSError(f"无法保存截图：{target}")
                     print(f"已保存合成界面截图：{target}")
                 except OSError as exc:

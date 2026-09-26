@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""找微信窗口 + Windows Graphics Capture 盯着它 + 从帧里定位消息区。帧全程内存，绝不落盘。"""
+"""找聊天窗口 + Windows Graphics Capture 盯着它 + 从帧里定位消息区。帧全程内存，绝不落盘。"""
 import ctypes
 import os
 import time
@@ -10,8 +10,8 @@ u32 = ctypes.windll.user32
 
 
 def find_wechat_hwnd():
-    """枚举可见顶层窗口，进程是 Weixin.exe/WeChat.exe 的里挑标题「微信」的（主窗口），没有就取第一个。
-    同进程还有 'Weixin'（工具窗）、'图片和视频'（看图窗）等，面积可能更大，所以不能按面积挑。"""
+    """枚举可见顶层窗口，按进程名挑主窗口，没有就取第一个。
+    同进程还有工具窗和看图窗，面积可能更大，所以不能按面积挑。"""
     k32 = ctypes.windll.kernel32
     found = []
 
@@ -38,7 +38,7 @@ def find_wechat_hwnd():
 
     u32.EnumWindows(cb, 0)
     if not found:
-        raise RuntimeError("没找到 Weixin.exe / WeChat.exe 的可见窗口，微信开着吗？")
+        raise RuntimeError("没找到聊天窗口，开着吗？")
     return next((h for h, t in found if t == "微信"), found[0][0])
 
 
@@ -94,7 +94,10 @@ class Capture:
         self.settle, self.max_wait = settle, max_wait
         self.shape = self.area = self.last = self.pending = None
         self.t = self.t0 = 0.0
-        cap = WindowsCapture(window_hwnd=hwnd)  # cursor_capture/draw_border 留默认，老版 Win10 不支持切换会抛异常
+        # 包装层默认 cursor_capture=True，会去调 SetIsCursorCaptureEnabled。
+        # 这个属性要 Win10 2004（build 19041）才有，1909 及更早直接抛 CursorConfigUnsupported。
+        # 显式 None 走系统默认，不去切换；draw_border 同理。
+        cap = WindowsCapture(cursor_capture=None, draw_border=None, window_hwnd=hwnd)
         cap.event(self.on_frame_arrived)
         cap.event(self.on_closed)
         self.ctl = cap.start_free_threaded()

@@ -14,6 +14,7 @@ key 一律由调用方从环境变量/注册表取了再传进来。协议具体
 """
 from __future__ import annotations
 
+import uuid
 from collections import namedtuple
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"  # OpenAI 兼容，列模型走它
@@ -25,29 +26,41 @@ LLM_ENV = "LLM_API_KEY"    # 唯一一把，不管选哪家语言模型
 # default 空 = 这家没有钦点的默认模型，用户得「获取模型」自己挑一个
 # extra：OpenAI 协议下开/关思考模式要额外带的 body 字段，各家不一样；
 #        anthropic / gemini 的思考开关是协议自带的参数，由 llm.py 直接处理，这里给空
+# headers：有的来源要求每个请求带固定头（不含 key）。keep：从「获取模型」结果里留下哪些 id
 # env：这家在生态里的惯用密钥变量名。LLM_API_KEY 空着时，**只有选中这家**才会退回读它
 #      （core/errors.py 的 _api_key）。没有公认惯例的（moonshot / zhipu / dashscope /
-#      siliconflow 和两个自定义来源）一律留空：宁可让用户填 LLM_API_KEY，也不替他们编一个
-#      名字去猜——猜错了就是拿别人的 key 去调这家的接口。
-_Draft = namedtuple("_Draft", "name protocol base default extra env", defaults=("",))
+#      siliconflow / opencode 和两个自定义来源）一律留空：宁可让用户填 LLM_API_KEY，也不替
+#      他们编一个名字去猜——猜错了就是拿别人的 key 去调这家的接口。
+_Draft = namedtuple("_Draft", "name protocol base default extra headers keep env",
+                    defaults=(None, None, ""))
 _NONE = lambda on: {}  # noqa: E731 —— 没有思考开关的来源
+# OpenCode Go 用这个头做路由和 prompt cache，缺了直接 400。进程内一个 UUID 就过格式校验
+_OPENCODE_HEADERS = {
+    "x-opencode-session": str(uuid.uuid4()),
+    "User-Agent": "jev-chat-windows",
+}
+# /v1/models 还混着走 /messages、/responses 的模型，那些用 chat/completions 会失败
+_OPENCODE_CHAT = ("deepseek-", "glm-", "kimi-", "mimo-", "longcat-", "hy", "space-bunny-")
+_opencode_chat = lambda model_id: model_id.startswith(_OPENCODE_CHAT)  # noqa: E731
 DRAFT_PROVIDERS = {  # 第一个就是默认：DeepSeek 官网直连
     "deepseek": _Draft("DeepSeek 官网", "openai", "https://api.deepseek.com", "deepseek-flash",
                        lambda on: {"thinking": {"type": "enabled" if on else "disabled"}},
-                       "DEEPSEEK_API_KEY"),
+                       env="DEEPSEEK_API_KEY"),
     "openrouter": _Draft("OpenRouter", "openai", OPENROUTER_BASE,
                          "deepseek/deepseek-v4.1-flash", lambda on: {"reasoning": {"enabled": on}},
-                         "OPENROUTER_API_KEY"),
+                         env="OPENROUTER_API_KEY"),
     "openai": _Draft("OpenAI", "openai", "https://api.openai.com/v1", "", _NONE,
-                     "OPENAI_API_KEY"),
+                     env="OPENAI_API_KEY"),
     "moonshot": _Draft("Moonshot (Kimi)", "openai", "https://api.moonshot.cn/v1", "", _NONE),
     "zhipu": _Draft("智谱 GLM", "openai", "https://open.bigmodel.cn/api/paas/v4", "", _NONE),
     "dashscope": _Draft("通义千问", "openai",
                         "https://dashscope.aliyuncs.com/compatible-mode/v1", "", _NONE),
     "siliconflow": _Draft("硅基流动", "openai", "https://api.siliconflow.cn/v1", "", _NONE),
+    "opencode": _Draft("OpenCode Go", "openai", "https://opencode.ai/zen/go/v1",
+                       "deepseek-v4.1-flash", _NONE, _OPENCODE_HEADERS, _opencode_chat),
     "anthropic": _Draft("Anthropic", "anthropic", "https://api.anthropic.com", "", _NONE,
-                        "ANTHROPIC_API_KEY"),
-    "gemini": _Draft("Google Gemini", "gemini", "", "", _NONE, "GEMINI_API_KEY"),
+                        env="ANTHROPIC_API_KEY"),
+    "gemini": _Draft("Google Gemini", "gemini", "", "", _NONE, env="GEMINI_API_KEY"),
     "custom_openai": _Draft("自定义 · OpenAI 兼容", "openai", "", "", _NONE),
     "custom_anthropic": _Draft("自定义 · Anthropic 兼容", "anthropic", "", "", _NONE),
 }
@@ -84,6 +97,15 @@ if __name__ == "__main__":
     assert DRAFT_PROVIDERS["deepseek"].extra(False) == {"thinking": {"type": "disabled"}}
     assert DRAFT_PROVIDERS["openrouter"].extra(True) == {"reasoning": {"enabled": True}}
     assert DRAFT_PROVIDERS["moonshot"].extra(True) == {}
+    assert DRAFT_PROVIDERS["deepseek"].headers is None and DRAFT_PROVIDERS["deepseek"].keep is None
+    go = DRAFT_PROVIDERS["opencode"]
+    assert go.protocol == "openai" and go.base == "https://opencode.ai/zen/go/v1"
+    assert go.default == "deepseek-v4.1-flash" and go.extra(True) == {}
+    uuid.UUID(go.headers["x-opencode-session"])
+    assert go.headers["User-Agent"] == "jev-chat-windows" and "key" not in go.headers
+    assert go.keep("deepseek-v4.1-flash") and go.keep("glm-5.3") and go.keep("hy3")
+    assert not any(go.keep(m) for m in (
+        "minimax-m3", "qwen3.8-max", "grok-4.7", "gpt-6-luna", "muse-spark-1.2-contributor"))
     # 全程只有一把 key，脱敏还得管老名字
     assert ENV_VARS == ["DEEPSEEK_API_KEY", "LLM_API_KEY"]
     # 惯用名长在来源旁边：有惯例的填上，没惯例的（含两个自定义来源）必须留空，不许编
@@ -92,7 +114,7 @@ if __name__ == "__main__":
     assert DRAFT_PROVIDERS["gemini"].env == "GEMINI_API_KEY"
     assert all(not DRAFT_PROVIDERS[key].env for key in CUSTOM)
     assert not any(DRAFT_PROVIDERS[key].env
-                   for key in ("moonshot", "zhipu", "dashscope", "siliconflow"))
+                   for key in ("moonshot", "zhipu", "dashscope", "siliconflow", "opencode"))
     # 遮蔽比解析宽：每个来源的惯用名都得在遮蔽清单里，反过来不成立
     assert {p.env for p in DRAFT_PROVIDERS.values() if p.env} < set(REDACT_ENV)
     assert "OPENROUTER_API_KEY" in REDACT_ENV and "OPENROUTER_API_KEY" not in LEGACY.values()
