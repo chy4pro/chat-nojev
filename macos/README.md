@@ -105,7 +105,7 @@
 
 **仅支持 Apple Silicon（M 系列）Mac**，macOS 13+。不支持 Intel Mac，也不要通过 Rosetta 运行；启动时会检测并以中文提示原因。（上游的理由是本地判断模型依赖的 torch 没有 Intel 版本（#19）；这一版没有 torch 了，但启动脚本那道检查原样保留——没有在 Intel 机器上验证过它还剩多少必要性。）
 
-**只想用**：**[下载 chat-nojev macos-v0.1.0](https://github.com/chy4pro/chat-nojev/releases/tag/macos-v0.1.0)** —— `jev-jarvis-macos-v0.1.0.zip`（0.1 MB，同一个 Release 下还有别名 `jev-jarvis-macos-latest.zip` 和一份 `SHA256SUMS` 校验和）。解压拖进「应用程序」，**第一次右键 → 打开**（没做公证，双击会被 Gatekeeper 拦）。
+**只想用**：**[下载 chat-nojev macos-v0.2.0](https://github.com/chy4pro/chat-nojev/releases/tag/macos-v0.2.0)** —— `jev-jarvis-macos-v0.2.0.zip`（0.2 MB，同一个 Release 下还有别名 `jev-jarvis-macos-latest.zip` 和一份 `SHA256SUMS` 校验和）。解压拖进「应用程序」，**第一次右键 → 打开**（没做公证，双击会被 Gatekeeper 拦）。
 
 zip 只有 0.1 MB 不是漏打包：`.app` 里是一个很小的启动器，首次运行时才联网拉自己的 Python 依赖（见下面「缺少可用的 uv 时」那段）——这是原版自己的设计，这一版没有改动它。构建用的是 `macos-latest` 这个 Apple Silicon（arm64）runner，`.app` 里的原生启动器也是 arm64。
 

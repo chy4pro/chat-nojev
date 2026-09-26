@@ -60,9 +60,9 @@
 
 **普通使用直接下载，不用装 Python、不用碰源码。** 后面的「源码运行」是给开发者的。
 
-👉 **[下载 chat-nojev windows-v0.1.0](https://github.com/chy4pro/chat-nojev/releases/tag/windows-v0.1.0)**
+👉 **[下载 chat-nojev windows-v0.2.0](https://github.com/chy4pro/chat-nojev/releases/tag/windows-v0.2.0)**
 
-1. 在 Release 页下载 `jev-chat-windows-v0.1.0.zip`（165.5 MB）
+1. 在 Release 页下载 `jev-chat-windows-v0.2.0.zip`（165.7 MB）
 2. 解压到一个固定目录（整个文件夹一起，exe 要用旁边那堆文件）
 3. 双击 `jev-chat-windows.exe`
 
@@ -323,7 +323,7 @@ pyinstaller --noconfirm --clean jev.spec
 
 出来的是 `dist\jev-chat-windows\`，整个文件夹就是成品（onedir：onefile 有 150MB 要每次启动解压）。
 推一个 `windows-v*` tag，仓库根目录的 `.github/workflows/release-windows.yml` 会在 `windows-latest` 上打好、压成 zip 挂到 Release 上——
-上面「下载即用」里的 `windows-v0.1.0` 就是这样出来的；手动触发（workflow_dispatch）只出 artifact，方便试打包。
+上面「下载即用」里的 `windows-v0.2.0` 就是这样出来的；手动触发（workflow_dispatch）只出 artifact，方便试打包。
 
 ## 设置说明
 

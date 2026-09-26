@@ -115,7 +115,7 @@
 
 ## 快速开始
 
-**1. 装包。** **[下载 android-v0.1.0](https://github.com/chy4pro/chat-nojev/releases/tag/android-v0.1.0)** —— `jev-chat-android-v0.1.0-unsigned.apk`（24.5 MB，另附一份 `.sha256`）。仅支持 ARM64 / `arm64-v8a`。
+**1. 装包。** **[下载 android-v0.2.0](https://github.com/chy4pro/chat-nojev/releases/tag/android-v0.2.0)** —— `jev-chat-android-v0.2.0-unsigned.apk`（24.6 MB，另附一份 `.sha256`）。仅支持 ARM64 / `arm64-v8a`。
 
 这个 APK **没有签名**：仓库没配签名密钥，CI 就只出未签名包。
 
@@ -124,7 +124,7 @@
 要装就得先自己签一次：
 
 ```
-apksigner sign --ks 你的.jks --out signed.apk jev-chat-android-v0.1.0-unsigned.apk
+apksigner sign --ks 你的.jks --out signed.apk jev-chat-android-v0.2.0-unsigned.apk
 ```
 
 安卓的签名是**自签**的，系统不看是谁签的、也不验证证书链，只要求有一个有效签名且包没被改过，所以 `keytool -genkeypair` 随手生成一把就够用，不花钱、不用申请。签完之后，这个包和别人签的同 id 包互相覆盖不了——签名不一致安装器不认，只能先卸载再装。
@@ -285,7 +285,7 @@ JDK 17 + Android SDK（platform 35 / build-tools 35）。
 - **X 只按中文界面验过**：分隔符 `：`、`上午 / 下午`、`Read` 是中文界面实测；英文界面只做了兜底，未验。
 - **群聊**：按一对一分析，「对方」与关系设定对群聊不准。
 - **中文**：题目沿用 jev-chat-jarvis 的英文原文（判断模型的主训练语言是英文），聊天内容保留中文；3 道 choice 题改成让模型用对话那门语言写一句短语作答，因此面板上的用词不再跟它逐字相同。
-- **没有真机验证**：CI 在 GitHub 的 runner 上把 `android-v0.1.0` 那个未签名 APK 编译打包了出来（见「快速开始」），但没有人把它装到手机上跑过。差分测试只盯着「判断和排序由谁产出」那一道接缝，采集、OCR、悬浮窗、回填这些原样继承的部分它一点都没看——那些代码在这里**一次都没运行过**。
+- **没有真机验证**：CI 在 GitHub 的 runner 上把 `android-v0.2.0` 那个未签名 APK 编译打包了出来（见「快速开始」），但没有人把它装到手机上跑过。差分测试只盯着「判断和排序由谁产出」那一道接缝，采集、OCR、悬浮窗、回填这些原样继承的部分它一点都没看——那些代码在这里**一次都没运行过**。
 - **知识库检索是标签/标题包含匹配**，不做语义检索，笔记请打好标签才能被命中。历史按「谁说 + 原文」去重，同一个人重复说同一句只记一次。
 - **OCR 依赖系统放行截屏**：无障碍服务要被系统允许截屏才能用，小米 / HyperOS 可能拒绝（面板会提示失败原因）；受保护窗口（`FLAG_SECURE`）截不到。
 - **OCR 只认屏幕上看得见的部分**：长消息被截断的部分读不到；识别有错字。

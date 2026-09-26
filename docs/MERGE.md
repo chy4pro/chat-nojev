@@ -181,7 +181,8 @@ Android `OverlayController` 的 `INTENT`/`NEEDS`/`ACTION`、macOS 的意图查�
   不配 key 时聊天内容走那台服务器（明文 HTTP），它的 `PRIVACY.md` 还替那台服务器做了「不出售、不共享」的
   承诺。这一版留空了（原版自己写着「留空 API_KEY 就退回老行为」）：那是原作者的服务和额度，派生版不该把
   用户接过去，更不该替别人的服务器做数据承诺。代价是不配 key 就不出候选，启动时弹窗。跟 Windows 关掉
-  更新检查、Android 改掉那两个按钮是同一类事。**2026-09-26 之前发的 `macos-v0.1.0` 包里还带着这把 key。**
+  更新检查、Android 改掉那两个按钮是同一类事。`macos-v0.1.0` 包里还带着这把 key，`macos-v0.2.0` 起没有；
+  打包脚本的 key 扫描也不再豁免 `src/builtin.py`，谁放一把回去，打包就失败。
 - **`NOTICE` 是原版的加上这一版的。** jev-chat-jarvis-mac 从 2026-09-23 起有自己的 NOTICE，`macos/NOTICE`
   先原样带着它，后面接这一版改了什么。
 - **版本号不跟原版，自己从 `0.1.0` 起编**（现在 `0.2.0`，原版现在 `0.6.0`）；`torch` / `transformers` / `huggingface-hub` / `laya` 从依赖里删了**
