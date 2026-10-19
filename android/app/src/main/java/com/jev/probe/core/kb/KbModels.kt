@@ -23,13 +23,13 @@ data class Note(
 /**
  * One person (or group) the user chats with. [aliases] is what makes a contact
  * cross-app: the same person shows up as different conversation titles in
- * WeChat / QQ / Feishu, and each of those titles can be listed here.
+ * QQ / Feishu / X, and each of those titles can be listed here.
  */
 data class Contact(
     val id: String,
     val name: String,
     val aliases: List<String> = emptyList(),
-    /** Package names this contact has been seen in, e.g. com.tencent.mm. */
+    /** Package names this contact has been seen in, e.g. com.tencent.mobileqq. */
     val apps: List<String> = emptyList(),
     val relationship: String = "",
     val notes: String = "",

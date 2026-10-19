@@ -84,7 +84,8 @@ Android `OverlayController` 的 `INTENT`/`NEEDS`/`ACTION`、macOS 的意图查�
 写的。合并之后同一段回答里还躺着判断，兜底一旦走到，抠出来的就是 JSON 自己的行。三套差分各有一个场景
 盯着这件事（候选全被过滤或清洗掉）：原版那边是「没有候选」，这一版在 2026-09-26 同步时，Windows 和 macOS
 都被这个场景抓到过——模型给了 `"replies": []`，Windows 递给用户的候选是 `{`、`judgment": {`，macOS 是
-`{`、`replies": [],`。Android 没中招，但只是侥幸：它的兜底刚好只框到那个空数组。现在三处写法一样：对象
+`{`、`replies": [],`。Android 当时没中招，但只是侥幸：它的兜底刚好只框到那个空数组。2026-10-19 起反过来，
+是 jev-chat-jarvis v1.7 自己的解析把 `[]` 变成一条字面的「[]」候选，Android 这个场景因此记为刻意不同（见下面 Android 一节）。现在三处写法一样：对象
 解析出来、`replies` 也在，就以它为准，包括 0 条；逐行兜底只留给「整段不是 JSON」。
 
 **适配层为什么不重新校验。** 原版 macOS 的 `JevJudge.judge` 在交出答案的路上会悄悄改它：意图查不到就
@@ -102,11 +103,17 @@ Android `OverlayController` 的 `INTENT`/`NEEDS`/`ACTION`、macOS 的意图查�
 | 变体 | 来自 | 采集方式 | 原版的调用 | 这一版 |
 |---|---|---|---|---|
 | [`windows/`](../windows/) | [jev-chat-windows](https://github.com/jev-chat/jev-chat-windows) | 微信 Windows 4.x 窗口截图 + 本地离线 OCR | 判断 1 → 起草 1 → 排序 1（v0.1.10 起；判断挂了退回起草 1 + 判断排序 1） | **1 次** |
-| [`android/`](../android/) | [jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis) | 无障碍读气泡节点（QQ / X / 飞书；v1.4 起不支持微信），其余 App 截屏走 ML Kit 离线 OCR | 判断 1 + 起草 1 + 排序 1（分属两路接口） | **1 次** |
+| [`android/`](../android/) | [jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis) | 无障碍读气泡节点（QQ / X / 飞书 / WhatsApp 一对一；v1.4 起不支持微信），其余 App 截屏走 ML Kit 离线 OCR | 判断 1 + 起草 1 + 排序 1（分属两路接口） | **1 次** |
 | [`macos/`](../macos/) | [jev-chat-jarvis-mac](https://github.com/jev-chat/jev-chat-jarvis-mac) | 抓微信窗口 + Vision OCR；QQ（v0.6.0 起）读无障碍树 | 判断 1 + 排序 1 + 每个话术一次生成（默认 3 个话术） | **每个话术一次**（默认 3 次） |
 
 ### Windows
 
+- **韩文界面下，那三道选择题照样显示模型写的那句。** jev-chat-windows v0.1.12 加了韩文界面（`app/i18n.py`），
+  面板上的选择题答案改成经 `T()` 把英文 key 翻成中文或韩文。这一版模型直接写短语（第三节开头那条），没有 key
+  可翻，所以这三项仍原样显示，只有缺值时的「暂未判断」走 `T()`；i18n 里那 18 条标签和判断那一节的 5 条文案
+  因此用不上，`i18n.py` 原样留着。提示词里「聊天内容仍然是中文」改成「仍然是对话原本的语言」：KakaoTalk 的
+  对话是韩文，原来那句跟「用对话那门语言写」互相矛盾。设置页开头那句「配置判断和起草用的两个模型」改成了
+  一个模型，并在 i18n 里补了韩文。
 - **更新检查关掉了。** 原版启动时（可关）向 `api.github.com/repos/jev-chat/jev-chat-windows/releases/latest`
   查一次版本号。那是**原版自己的** Release 页，版本号跟这里的代码根本不是一回事，查到「有新版」只会把
   用户导去装另一个程序。现在 `app/update.py` 的 `_REPO` 留空，`check_latest()` 直接返回 `None`，一个请求
@@ -138,24 +145,29 @@ Android `OverlayController` 的 `INTENT`/`NEEDS`/`ACTION`、macOS 的意图查�
   不改就只能二选一：安卓按应用 id 认包，同 id 且签名不同的两个包互相装不上去。改了才能**和原版并排装在
   同一台手机上对着比**——这正是想要的。Kotlin 包名（`namespace`）没动。
 - **无障碍服务的组件名从写死的字符串改成动态拼的**（`MainActivity` 里
-  `"com.jev.probe/…SelectToSpeakService"` → `"$packageName/…"`）。这是上一条的直接后果：那个字符串要拿去
+  `"$packageName/com.jev.probe.capture.ChatCaptureService"`；jev-chat-jarvis v1.5 起不再把服务伪装成
+  `SelectToSpeakService`，组件名跟着变了，从 v0.2.0 升上来的要在系统设置里把无障碍关掉再打开一次）。这是上一条的直接后果：那个字符串要拿去
   跟系统的 `ENABLED_ACCESSIBILITY_SERVICES` 比对，而系统那边的条目是「应用 id/类名」。不跟着改，主页会
   永远报「无障碍没开」。全项目只有这一处把应用 id 写成了字面量。
-- **签名配置不再默认指向一个 Windows 路径——这是修原版的 bug。** 原版写的是
-  `file(System.getenv("JEV_KEYSTORE_PROPS") ?: "H:/android/keys/jev-release.properties")`。Gradle 的
-  `file()` 会把字符串按 URI 解析，Linux 上那个盘符前缀在配置阶段就转换失败，构建还没走到「要不要签名」
-  那一步就死了——于是在 Windows 以外的任何机器上**连一个未签名的 release 都打不出来**，尽管它自己的
-  注释写着「没有这个文件就出未签名包」。现在没有默认值：环境变量没设就是不签，正是那句注释一直承诺的
-  行为。不修就没有 CI，也就没有那个 APK。
+- （已撤销）签名配置那条偏离：原版默认指向 `H:/android/keys/...`，用 Gradle 的 `file()` 解析，在 Linux 上
+  配置阶段就失败，离开 Windows 打不出包，所以这一版去掉了默认值。jev-chat-jarvis 在 `b2665c6`
+  （2026-10-05）自己改成了 `File()`，Linux 上只是找不到那个文件、照样出未签名包，2026-10-19 起取原版的。
 - **`gradlew` 补上了可执行位。** 原版提交的是 `rw-r--r--`，`./gradlew` 跑不起来（它们大概只用
   `gradlew.bat`）。
-- **版本号不跟原版，自己从 `1` / `0.1.0` 起编**（现在 `2` / `0.2.0`；原版建仓时是 `4` / `1.3`，现在 `5` / `1.4`）。这是另一份代码，不该冒用它的版本号。
+- **版本号不跟原版，自己从 `1` / `0.1.0` 起编**（现在 `2` / `0.2.0`；原版建仓时是 `4` / `1.3`，现在 `8` / `1.7`）。这是另一份代码，不该冒用它的版本号。
 - **`apk/` 目录没有跟着拷过来。** 那里面是原版签好名的成品，跟这里的改动无关；留着只会让人装错东西。
 - 顺带改对了原版 README 里的一处笔误：危险等级是 **0–9**，不是它写的 1–9（题面里就是 10 档）。
 - **App 里「隐私政策」「开源仓库」两个按钮指本仓库。** jev-chat-jarvis v1.4 把它们指向 chatjevs.com 的隐私
   政策和自己的仓库；那一页写的是它的两路接口加判断服务商，跟这一版对不上，而且 NOTICE 明写了不能拿这个
   域名暗示背书。按钮打开的是 `android/PRIVACY.md`，已按一次调用改写。跟 Windows 关掉更新检查是同一类事：
   App 里任何会把用户导向原版的出口都不该留。
+- **原版 v1.7 在排序和解析上的两个新问题，这一版没有。** jev-chat-jarvis v1.7 不再把候选补足三条，可排序题
+  `rankQuestion` 还要求恰好三条：两条候选时排序抛异常，被吞成空列表，面板一条候选都没有（它自己「2 条」
+  的设置每一轮都这样）。另一个是 `[]` 走逐行兜底时只滤掉单独的 `[`、`]`，于是字面的「[]」成了一条 100% 的
+  候选。这两段都在这一版换成一次调用的那条路上：两条候选照常排，空数组就是零条，面板显示
+  「（未生成候选回复）」。差分里三个场景记为刻意不同，只差在 `rankedReplies`。
+- **回复语言跟随对方。** 原版 v1.7 的提示词「回复语言跟随对方最近一条消息」原样搬进了合并后的提示词；判断
+  说明那句「聊天内容仍然是中文」改成「仍然是对话原本的语言」，跟 Windows 一样。
 
 ### macOS
 
@@ -185,9 +197,12 @@ Android `OverlayController` 的 `INTENT`/`NEEDS`/`ACTION`、macOS 的意图查�
   打包脚本的 key 扫描也不再豁免 `src/builtin.py`，谁放一把回去，打包就失败。
 - **`NOTICE` 是原版的加上这一版的。** jev-chat-jarvis-mac 从 2026-09-23 起有自己的 NOTICE，`macos/NOTICE`
   先原样带着它，后面接这一版改了什么。
-- **版本号不跟原版，自己从 `0.1.0` 起编**（现在 `0.2.0`，原版现在 `0.6.0`）；`torch` / `transformers` / `huggingface-hub` / `laya` 从依赖里删了**
-  （本地模型没了，它们没人用）。`uv.lock` 是原版 0.6.0 那一份，还锁着这四个，版本号也对不上——没在 macOS 上重跑过
+- **版本号不跟原版，自己从 `0.1.0` 起编**（现在 `0.2.0`，原版现在 `0.6.2`）；`torch` / `transformers` / `huggingface-hub` / `laya` 从依赖里删了**
+  （本地模型没了，它们没人用）。`uv.lock` 是原版 0.6.2 那一份，还锁着这四个，版本号也对不上——没在 macOS 上重跑过
   `uv lock`，**这是个已知的不一致**。
+- **不往原版的 Homebrew tap 发。** jev-chat-jarvis-mac 的 `packaging/release.sh --publish` 发完 Release 会克隆并
+  推送它自己的 `jev-chat/homebrew-tap`，那个 cask 装的是原版。这一版没有 tap，那一段删了；README 也去掉了
+  `brew install` 那段。我们的 CI 打包时从不传 `--publish`，删掉是为了手动发版时不去碰别人的仓库。
 
 ## 合并顺带改掉的行为
 

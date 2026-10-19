@@ -35,9 +35,9 @@ What the layer still does, because it is structurally necessary:
 - extracting the JSON object from the response text, including a fenced block, and falling
   back to upstream's own line-by-line candidate reader for an answer that is not JSON at
   all — that is parsing, not validation;
-- padding the candidates to three with `（稍等，我看下）`, which is upstream's
-  `ReplyClient.parseThree` behaviour and is what makes "the model wrote two replies"
-  land the same way on both sides;
+- keeping at most as many candidates as were asked for and dropping blank ones, which is
+  what upstream's `ReplyClient.parseN` does since v1.7 (until v1.4 both sides padded to three
+  with `（稍等，我看下）`; upstream stopped, and so did this layer);
 - tolerating the spellings a model uses for a noul — a bare number, `{"noul": x}`, or
   `true`/`false` for 1 / 0 — and the same bare-value spelling for a choice or a score;
 - accepting the judgment fields whether the model nested them under `judgment` or put them
@@ -159,7 +159,19 @@ hand-written stubs.
     tools/equivalence_check_android.sh --upstream /path/to/jev-chat-jarvis \
                                        --probe /path/to/kotlinc-probe
 
-Sixteen scenarios, **all sixteen identical on every compared field**, none failing.
+Seventeen scenarios (2026-10-19, against jev-chat-jarvis `bd3fe42`, v1.7 + 18): **fourteen
+identical on every compared field, three intentionally different**, none failing. The three
+differ only in `rankedReplies`, every judgment field is identical, and each one is upstream
+v1.7 misbehaving in code this version replaced:
+
+- `two_candidates_only` and `choice_names_missing_candidate`: upstream stopped padding to
+  three candidates in v1.7, but its ranking question `rankQuestion` still `require`s exactly
+  three. With two candidates the ranking throws, `JevClient` swallows it into an empty list,
+  and the panel shows no candidates at all (upstream's own "2 条" setting does this every
+  round). Here the two candidates are ranked by the same call that wrote them.
+- `all_candidates_filtered_out`: upstream's line-by-line fallback filters a lone `[` or `]`
+  but not the line `[]`, so an empty `[]` becomes one candidate reading "[]" at 100%. Here an
+  empty `replies` is zero candidates and the panel says 「（未生成候选回复）」.
 `latencyMs` is excluded: it is wall-clock time, not a value either side computed.
 
 Scenarios that exist specifically to hold the standard in place:
@@ -171,12 +183,13 @@ Scenarios that exist specifically to hold the standard in place:
 - `probabilities_not_normalized` feeds both sides per-candidate scores that sum to 10.
   Neither side normalizes them.
 - `confidence_omitted` drops `confidence` from two answers; both sides render 0%.
-- `two_candidates_only` gives two replies where three were asked for; both sides pad.
+- `two_candidates_only` gives two replies where three were asked for (intentionally
+  different since v1.7, see above).
 
 Negative controls (`--negative-control keys|clamp`, which patch a *copy* of our tree):
 
-- `keys` reverses the reply keys, so the scores land on the wrong candidates: **15 of the
-  16 turn red**. The one that stays green is `ranking_block_missing`, where every score is
+- `keys` reverses the reply keys, so the scores land on the wrong candidates: **13 of the
+  17 turn red** (the three intentional differences stay as they are). The one that stays green is `ranking_block_missing`, where every score is
   0.0 and the order cannot be wrong.
 - `clamp` makes the adapter clamp the tension score into 0..9 — the exact re-validation
   this document argues against: `score_out_of_range` turns red, upstream 11.0 against our

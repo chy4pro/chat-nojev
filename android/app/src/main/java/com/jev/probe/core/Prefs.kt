@@ -163,6 +163,22 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getInt(K_BUBBLE_X, -1)
         set(v) = sp.edit().putInt(K_BUBBLE_X, v).apply()
 
+    /** How many candidate replies to draft (1..3). With 1 there is no ranking. */
+    var candidateCount: Int
+        get() = sp.getInt(K_CANDIDATES, 3).coerceIn(1, 3)
+        set(v) = sp.edit().putInt(K_CANDIDATES, v.coerceIn(1, 3)).apply()
+
+    /** Where the analysis card sits in [pkg] (px), or null for the default top position. */
+    fun cardPosition(pkg: String): Pair<Int, Int>? {
+        val x = sp.getInt(K_CARD_X + pkg, -1)
+        val y = sp.getInt(K_CARD_Y + pkg, -1)
+        return if (x < 0 || y < 0) null else x to y
+    }
+
+    fun saveCardPosition(pkg: String, x: Int, y: Int) {
+        sp.edit().putInt(K_CARD_X + pkg, x).putInt(K_CARD_Y + pkg, y).apply()
+    }
+
     /** Auto-analyze on every incoming message; if false, user taps to analyze. */
     var autoAnalyze: Boolean
         get() = sp.getBoolean(K_AUTO, true)
@@ -226,6 +242,9 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_BUBBLE_Y = "bubble_y"
         private const val K_BUBBLE_X = "bubble_x"
         private const val K_AUTO = "auto_analyze"
+        private const val K_CANDIDATES = "candidate_count"
+        private const val K_CARD_X = "card_x_"
+        private const val K_CARD_Y = "card_y_"
 
         const val OCR_MLKIT = "mlkit"
         const val OCR_VISION = "vision"

@@ -7,6 +7,7 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -21,13 +22,15 @@ import com.jev.probe.core.kb.ContextBuilder
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.jev.JevClient
 import com.jev.probe.overlay.OverlayController
+import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
- * The live capture service (registered under a disguised class name so WeChat
- * exposes its node tree — see the disguised subclass). It reads whichever
+ * The live capture service. It reads whichever
  * adapted chat app is in the foreground, detects a new incoming message from the
  * other person, runs the analysis off the main thread, and drives the floating
  * overlay.
@@ -44,13 +47,36 @@ open class ChatCaptureService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newFixedThreadPool(2)
 
-    /** Adapted chat apps, keyed by package name.
-     *  WeChat is intentionally NOT wired in: reading it (node tree / screenshot /
-     *  OCR) is what trips WeChat's anti-screenshot risk control, so it is fully
-     *  disabled and handled by a short-circuit notice instead of an adapter (see
-     *  [maybeCapture] / [onAccessibilityEvent]). [WeChatAdapter] is kept in the
-     *  codebase for a possible future restore, just not used here. */
-    private val adapters = listOf(QQAdapter(), XAdapter(), FeishuAdapter()).associateBy { it.pkg }
+    /** The model HTTP runs here under a hard watchdog (see [withHardTimeout]).
+     *  Cached so an abandoned request — interrupts do not break a wedged socket
+     *  read — never blocks the next round's threads. */
+    private val analysisPool = Executors.newCachedThreadPool { r ->
+        Thread(r, "jev-http").apply { isDaemon = true }
+    }
+
+    /**
+     * Run [body] on [analysisPool] but never wait longer than [ms].
+     *
+     * HttpURLConnection bounds connect/read per attempt yet NOT DNS resolution
+     * (and some OEM stacks stall connects beyond both), so one wedged request
+     * used to hold its round's callback forever: the panel stayed on 生成中 and
+     * the round's [analyzing] flag never dropped, silently discarding every
+     * later analysis. Past the ceiling we abandon the attempt and surface a
+     * plain, retryable error instead.
+     */
+    private fun <T> withHardTimeout(ms: Long, what: String, body: () -> T): T {
+        val f = analysisPool.submit(Callable { body() })
+        return try {
+            f.get(ms, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            f.cancel(true)
+            throw java.io.IOException("$what 超时（${ms / 1000}秒），请检查网络后重试")
+        }
+    }
+
+    /** Adapted chat apps, keyed by package name. Apps in [BLOCKED_PKGS] are
+     *  never read at all (see [maybeCapture] / [onAccessibilityEvent]). */
+    private val adapters = listOf(QQAdapter(), XAdapter(), FeishuAdapter(), WhatsAppAdapter()).associateBy { it.pkg }
 
     /** Submit to the worker, ignoring rejection after the service is torn down
      *  (a stale overlay callback must never crash the process). */
@@ -63,7 +89,14 @@ open class ChatCaptureService : AccessibilityService() {
     private var lastSignature: String = ""
     private var activePkg: String? = null
     private var analyzing = false
+    /** A "换一组" redraft is in flight (candidates only; the judgment stays). */
+    private var regenerating = false
     private val session = ConversationSession()
+    /** Tells new incoming messages apart from scrolling through history. */
+    private val gate = NewMessageGate()
+    /** The snapshot and knowledge context of the last analysis, reused by "换一组". */
+    private var lastAnalyzed: ChatSnapshot? = null
+    private var lastCtx: com.jev.probe.core.kb.ChatContext? = null
     private val analysisTasks = ArrayList<Future<*>>()
     private var destroyed = false
     private val preferencesListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -81,9 +114,20 @@ open class ChatCaptureService : AccessibilityService() {
         main.removeCallbacks(debounce)
         pendingSnapshot = null
         analyzing = false
+        regenerating = false
         analysisTasks.forEach { it.cancel(true) }
         analysisTasks.clear()
         overlay?.resetForNewConversation()
+    }
+
+    /** Drop the round in flight (its result would be stale) but keep what the card shows. */
+    private fun cancelInFlight() {
+        session.invalidate()
+        main.removeCallbacks(debounce)
+        analyzing = false
+        regenerating = false
+        analysisTasks.forEach { it.cancel(true) }
+        analysisTasks.clear()
     }
 
     private fun observeTarget(target: ConversationSession.Target?) {
@@ -93,6 +137,9 @@ open class ChatCaptureService : AccessibilityService() {
             activePkg = null
             lastSignature = ""
             lastOcrSignature = ""
+            gate.reset()
+            lastAnalyzed = null
+            lastCtx = null
         }
     }
 
@@ -105,15 +152,25 @@ open class ChatCaptureService : AccessibilityService() {
     /** Read the live target, never the previous chat's cached/stabilized title. */
     private fun targetFor(root: AccessibilityNodeInfo): ConversationSession.Target? {
         val pkg = root.packageName?.toString() ?: return null
-        if (pkg == PKG_WECHAT || pkg == packageName || pkg == "com.android.systemui" ||
+        if (isBlocked(pkg) || pkg == packageName || pkg == "com.android.systemui" ||
             pkg.contains("launcher", true) || pkg == "com.miui.home") return null
         val adapter = adapters[pkg]
         var messagesSignature: String? = null
         val title = if (adapter != null) {
             val snapshot = adapter.extract(root, resources) ?: return null
             messagesSignature = snapshot.takeIf { it.messages.isNotEmpty() }?.signature()
-            // A loading/unknown title cannot prove which conversation is open.
-            snapshot.title?.takeUnless { isTransientTitle(it) } ?: return null
+            // A loading/unknown title cannot prove which conversation is open —
+            // unless the SAME app+window already has a known one: animated
+            // headers swap in skeleton/transient titles for a beat (#68), and
+            // unbinding the session there killed in-flight analyses. Keep the
+            // previously verified title instead.
+            val fresh = snapshot.title?.takeUnless { isTransientTitle(it) }
+            if (fresh != null) fresh
+            else {
+                val known = session.target
+                if (known != null && known.pkg == pkg && known.windowId == root.windowId &&
+                    !known.title.isNullOrBlank()) known.title else return null
+            }
         } else {
             findTitleInActionBar(root, Int.MAX_VALUE, resources.displayMetrics.widthPixels,
                 resources, 0.15, 0.85)
@@ -124,7 +181,12 @@ open class ChatCaptureService : AccessibilityService() {
     private fun isCurrent(token: ConversationSession.Token): Boolean {
         if (destroyed || !prefs.enabled || !session.accepts(token)) return false
         val live = rootInActiveWindow?.let { targetFor(it) }
-        if (live != token.target || !prefs.isAllowed(currentSnapshot?.title ?: live.title)) {
+        // A null re-extract is a transient accessibility glitch (list animation,
+        // node cache miss), NOT proof the chat was left — hiding there killed
+        // freshly rendered candidates (seen on QQ). Identity checks apply
+        // only when we actually got a reading.
+        if (live != null && (!live.sameConversation(token.target) ||
+            !prefs.isAllowed(currentSnapshot?.title ?: live.title))) {
             leaveConversation()
             overlay?.hide()
             return false
@@ -139,6 +201,21 @@ open class ChatCaptureService : AccessibilityService() {
 
     private val debounce = Runnable { runAnalysis() }
     private var pendingSnapshot: ChatSnapshot? = null
+
+    /**
+     * #18: WINDOW_STATE_CHANGED blips — the notification shade, a permission
+     * dialog, a split-screen handle — are transient, but the drop branch below
+     * used to tear the bubble down the instant one arrived, and an open panel
+     * was lost mid-read. Hide only if the screen is STILL a drop-zone after a
+     * short grace period; any chat-app event in between cancels the hide.
+     */
+    private val confirmAwayHide = Runnable {
+        val fg = rootInActiveWindow?.packageName?.toString()
+        val stillAway = fg == null || fg == packageName ||
+            fg.contains("launcher", ignoreCase = true) ||
+            fg == "com.miui.home" || fg == "com.android.systemui"
+        if (stillAway) overlay?.hide()
+    }
     @Volatile private var currentSnapshot: ChatSnapshot? = null
     private var foregroundPkg: String? = null
 
@@ -156,11 +233,10 @@ open class ChatCaptureService : AccessibilityService() {
      *  See [ocrSignature]: this is the brake on the OCR path. */
     private var lastOcrSignature: String = ""
 
-    /** WeChat is fully disabled — we never read it, so instead of a signature we
-     *  just track whether the "WeChat not supported" notice has been shown for
-     *  the current WeChat visit. Reset to false whenever a non-WeChat foreground
-     *  is seen, so it re-appears next visit but does not re-pop on every event. */
-    private var wechatNoticeShown = false
+    /** Whether the "not supported" notice has been shown for the current visit
+     *  to a blocked app. Reset whenever another foreground is seen, so it
+     *  re-appears next visit but does not re-pop on every event. */
+    private var blockedNoticeShown = false
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -171,6 +247,7 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.onManualAnalyze = {
             currentSnapshot?.let { pendingSnapshot = it; runAnalysis() }
         }
+        overlay?.onRegenerate = { regenerateReplies() }
         // Bubble menu: file the open conversation as a knowledge-base contact.
         // Contacts are never created automatically — this is the one-tap way in.
         overlay?.onSaveContact = {
@@ -206,6 +283,15 @@ open class ChatCaptureService : AccessibilityService() {
         if (!prefs.enabled) { leaveConversation(); overlay?.hide(); return }
 
         val type = event.eventType
+        // #18-4: our own overlay redraws ("generating…" → judgment → candidates)
+        // emit WINDOW_CONTENT_CHANGED / VIEW_SCROLLED carrying our package name.
+        // Reacting to them woke the service in a loop: re-read → re-analyze →
+        // redraw → …, which pinned the panel on "generating" forever. Window-state
+        // events keep flowing: the fg == packageName branch above still hides the
+        // bubble inside our own settings screens.
+        if (event.packageName?.toString() == packageName &&
+            (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+             type == AccessibilityEvent.TYPE_VIEW_SCROLLED)) return
         // Decide "did we leave the chat app" from the REAL active window, not the
         // event's package. The event package can be an IME (e.g. com.tencent.wetype)
         // or the status bar while the chat app is still foreground — keying off it
@@ -220,20 +306,27 @@ open class ChatCaptureService : AccessibilityService() {
         // our own settings screens, the launcher, and the system UI.
         if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val fg = rootInActiveWindow?.packageName?.toString()
-            // WeChat is fully disabled: never read/screenshot/OCR/fill here, only
-            // show the one-time "not supported" notice and stop. Checked before the
-            // generic no-adapter branch because WeChat is no longer in `adapters`.
-            if (fg == PKG_WECHAT) { foregroundPkg = fg; showWeChatDisabled(auto = true); return }
+            // Blocked apps: never read/screenshot/OCR/fill there, only show the
+            // one-time "not supported" notice and stop. Checked before the
+            // generic no-adapter branch.
+            if (isBlocked(fg)) { foregroundPkg = fg; showBlocked(auto = true); return }
             if (fg != null && fg !in adapters) {
                 val target = rootInActiveWindow?.let { targetFor(it) }
                 if (session.target != target) leaveConversation()
                 foregroundPkg = fg
-                wechatNoticeShown = false // left WeChat → allow the notice again next visit
+                blockedNoticeShown = false // left a blocked app → allow the notice again next visit
                 val drop = fg == packageName ||
                     fg.contains("launcher", ignoreCase = true) ||
                     fg == "com.miui.home" ||
                     fg == "com.android.systemui"
-                if (drop) overlay?.hide() else overlay?.showIdle(null)
+                if (drop) {
+                    // Grace period instead of an instant tear-down (see [confirmAwayHide]).
+                    main.removeCallbacks(confirmAwayHide)
+                    main.postDelayed(confirmAwayHide, FOREGROUND_CONFIRM_MS)
+                } else {
+                    main.removeCallbacks(confirmAwayHide)
+                    overlay?.showIdle(null)
+                }
                 return
             }
         }
@@ -246,13 +339,15 @@ open class ChatCaptureService : AccessibilityService() {
     }
 
     private fun maybeCapture() {
+        // The chat app is back (or never left): a pending hide confirmation is moot.
+        main.removeCallbacks(confirmAwayHide)
         val root = rootInActiveWindow ?: run { leaveConversation(); overlay?.hide(); return }
         val pkg = root.packageName?.toString()
-        // WeChat is fully disabled — no tree read, no screenshot, no OCR, no fill.
-        // A content-changed / scrolled event in WeChat only re-shows the one-time
+        // Blocked apps — no tree read, no screenshot, no OCR, no fill. A
+        // content-changed / scrolled event there only re-shows the one-time
         // notice (deduped); it must never reach an adapter or the OCR path.
-        if (pkg == PKG_WECHAT) { showWeChatDisabled(auto = true); return }
-        wechatNoticeShown = false // any other foreground → allow the notice again next WeChat visit
+        if (isBlocked(pkg)) { showBlocked(auto = true); return }
+        blockedNoticeShown = false // any other foreground → allow the notice again next visit
         // Apps with no adapter are never handled automatically (v1.3 revision):
         // the only way in for them is the bubble menu's "截屏识别一次".
         val adapter = adapters[pkg] ?: run {
@@ -265,15 +360,17 @@ open class ChatCaptureService : AccessibilityService() {
         // bubble so the menu stays reachable. Without this, opening QQ / Feishu on
         // their list screen produced no bubble at all.
         val rawSnapshot = adapter.extract(root, resources)
-        if (rawSnapshot == null) { leaveConversation(); overlay?.showIdle(null); return }
+        if (rawSnapshot == null) { scheduleLeave(); return }
         val target = targetFor(root)
-        if (target == null) { leaveConversation(); overlay?.showIdle(null); return }
+        if (target == null) { scheduleLeave(); return }
+        main.removeCallbacks(confirmLeave)
         observeTarget(target)
+        overlay?.setApp(pkg)
         // Use only this window's title; never inherit another conversation's title.
         val snapshot = rawSnapshot
         if (!prefs.isAllowed(snapshot.title)) { leaveConversation(); overlay?.hide(); return }
-        // In a chat window but the tree holds no text (Feishu draws its bodies,
-        // WeChat hides them when the disguise fails) → screenshot + OCR, subject
+        // In a chat window but the tree holds no text (Feishu draws its bodies)
+        // → screenshot + OCR, subject
         // to ScreenCapture's own >=1s throttle and failure backoff.
         if (snapshot.messages.isEmpty()) {
             // In a chat window, but the tree carries no text (Feishu draws its
@@ -281,7 +378,7 @@ open class ChatCaptureService : AccessibilityService() {
             // still has something to tap when OCR is off, deduped, or comes back
             // empty — previously all three cases left the screen with no bubble.
             if (overlay?.isShowing() != true) overlay?.showIdle(snapshot.title)
-            if (prefs.ocrFallback) {
+            if (prefs.ocrFallback && pkg !in NO_SCREENSHOT_PKGS) {
                 // Gate BEFORE the shot, not after the OCR. Feishu's tree is empty
                 // on every content-changed event, and a successful shot resets the
                 // failure backoff — so without this the caret blinking or an
@@ -305,16 +402,19 @@ open class ChatCaptureService : AccessibilityService() {
         currentSnapshot = snapshot
         val sig = snapshot.signature()
         val showing = overlay?.isShowing() == true
-        // Same content and the bubble is already up → nothing to do.
+        // Same content and the card is already up → nothing to do.
         if (sig == lastSignature && showing) return
-        // Same content but the bubble is gone (killed by MIUI, or we left and came
-        // back) → just put the bubble back, do NOT re-analyze (saves tokens/time).
-        if (sig == lastSignature && !showing) { overlay?.showIdle(snapshot.title); return }
-        // Anything else reaching here is a genuinely different conversation (new
-        // app, or new content in this one) — a leftover judgment/candidates from
-        // whatever was shown before must not leak into it.
-        cancelAnalysis()
         lastSignature = sig
+        // Scrolling through history changes what is on screen but brings nothing
+        // new: keep the card exactly as it is (no clearing, no re-analysis). The
+        // same goes for the user's own new message. Only a first look at a chat or
+        // a new incoming message goes on to analysis.
+        when (gate.observe(snapshot.messages)) {
+            NewMessageGate.Verdict.NOTHING_NEW, NewMessageGate.Verdict.NEW_FROM_ME -> {
+                overlay?.showIdle(snapshot.title); return
+            }
+            NewMessageGate.Verdict.FIRST_LOOK, NewMessageGate.Verdict.NEW_FROM_OTHER -> Unit
+        }
         Log.d(TAG, "snapshot[$pkg] title=${snapshot.title} n=${snapshot.messages.size} " +
             snapshot.messages.takeLast(6).joinToString(" | ") { "${it.side}:${it.text.length}" }) // sides + lengths only, never content
 
@@ -324,29 +424,94 @@ open class ChatCaptureService : AccessibilityService() {
             overlay?.showIdle(snapshot.title); return
         }
 
+        // A newer message makes any round in flight stale; the card keeps showing
+        // the previous result until the new one lands.
+        cancelInFlight()
         pendingSnapshot = snapshot
         main.removeCallbacks(debounce)
         main.postDelayed(debounce, 800) // debounce bursts of content-changed events
     }
 
     /**
-     * Foreground is WeChat, which is fully disabled: no node-tree read, no
-     * screenshot, no OCR, no fill. We only surface a one-time notice saying WeChat
-     * itself blocks reading. [auto] events (accessibility callbacks)
-     * show it once per WeChat visit — [wechatNoticeShown] dedupes them; a manual
-     * bubble tap ([auto] = false) always shows it. Never gated by the user's
-     * whitelist (it is an info notice, not a read) and only ever reached under
-     * the WeChat package.
+     * A chat app's tree can briefly read as "not a chat" while its list re-lays
+     * out (QQ while scrolling). Leave the conversation only if it still reads
+     * that way after a short grace period; any good read in between cancels it.
      */
-    private fun showWeChatDisabled(auto: Boolean) {
+    private val confirmLeave = Runnable {
+        val root = rootInActiveWindow
+        val adapter = root?.packageName?.toString()?.let { adapters[it] }
+        val gone = root == null || adapter == null ||
+            adapter.extract(root, resources) == null || targetFor(root) == null
+        if (gone) { leaveConversation(); overlay?.showIdle(null) }
+    }
+
+    private fun scheduleLeave() {
+        if (session.target == null) { leaveConversation(); overlay?.showIdle(null); return }
+        main.removeCallbacks(confirmLeave)
+        main.postDelayed(confirmLeave, LEAVE_CONFIRM_MS)
+    }
+
+    /** "换一组" / 重试: redraft the candidates only; the judgment on the card stays. */
+    private fun regenerateReplies() {
+        if (analyzing || regenerating || destroyed || !prefs.enabled) return
+        val snapshot = lastAnalyzed ?: currentSnapshot ?: return
+        val token = session.token() ?: return
+        if (!isCurrent(token)) return
+        if (!prefs.hasKey()) { overlay?.showError("未设置模型接口密钥，去设置里填"); return }
+        regenerating = true
+        val avoid = overlay?.currentReplyTexts().orEmpty()
+        overlay?.beginRegenerate()
+        val client = JevClient(prefs)
+        val rel = prefs.relationship
+        val ctx = lastCtx
+        val count = prefs.candidateCount
+        // There is no candidates-only call: the one call answers the judgment
+        // again too. Only its candidates go on the card; the judgment shown
+        // stays, as upstream's redraft leaves it.
+        submitAnalysis {
+            var replyError: String? = null
+            val ranked = try {
+                val analysis = withHardTimeout(REPLY_TIMEOUT_MS, "回复接口") {
+                    client.analyze(snapshot, rel, ctx, count, avoid)
+                }
+                // analyze() returns its failure instead of throwing it; read it
+                // the way upstream read the one its draftAndRank threw.
+                analysis.error?.let { replyError = replyErrorText(java.io.IOException(it)) }
+                analysis.rankedReplies
+            } catch (e: Exception) {
+                replyError = replyErrorText(e)
+                Log.w(TAG, "redraft failed: $replyError")
+                emptyList()
+            }
+            main.post {
+                regenerating = false
+                if (isCurrent(token)) overlay?.showReplies(ranked, replyError) { text -> fillInput(token, text) }
+            }
+        }
+    }
+
+    private fun replyErrorText(e: Exception): String {
+        val m = e.message ?: e.javaClass.simpleName
+        return if (m.contains("超时")) "生成超时" else m
+    }
+
+    private fun isBlocked(pkg: String?): Boolean = pkg != null && pkg in BLOCKED_PKGS
+
+    /**
+     * Foreground is a blocked app: no node-tree read, no screenshot, no OCR, no
+     * fill. We only surface a one-time "not supported" notice. [auto] events
+     * (accessibility callbacks) show it once per visit — [blockedNoticeShown]
+     * dedupes them; a manual bubble tap ([auto] = false) always shows it. Never
+     * gated by the user's whitelist (it is an info notice, not a read).
+     */
+    private fun showBlocked(auto: Boolean) {
         leaveConversation()
-        if (auto && wechatNoticeShown) return
-        wechatNoticeShown = true
-        // No popup panel in WeChat — a full card is intrusive when others can see
-        // the screen. Take the overlay off WeChat entirely and show the reason
-        // once as a small transient toast.
+        if (auto && blockedNoticeShown) return
+        blockedNoticeShown = true
+        // No popup panel there — take the overlay off entirely and show the
+        // reason once as a small transient toast.
         overlay?.hide()
-        overlay?.toast(WECHAT_DISABLED_MSG)
+        overlay?.toast(BLOCKED_MSG)
     }
 
     /** A placeholder title an app shows only for a moment (e.g. X's "连接中…"
@@ -361,14 +526,20 @@ open class ChatCaptureService : AccessibilityService() {
 
     private fun runAnalysis() {
         val snapshot = pendingSnapshot ?: return
-        if (analyzing || destroyed || !prefs.enabled) return
+        if (analyzing || destroyed || !prefs.enabled) {
+            // A lost round used to strand analyzing=true here forever, with
+            // nothing in logcat saying why updates stopped — never again.
+            if (analyzing) Log.w(TAG, "round skipped: previous round still in flight")
+            return
+        }
         val previous = session.token() ?: return
         if (!isCurrent(previous)) return
         if (!prefs.hasKey()) { overlay?.showError("未设置模型接口密钥，去设置里填"); return }
         val token = session.begin() ?: return
         analyzing = true
-        overlay?.showLoading()
+        overlay?.beginRound()
         overlay?.setNote(snapshot.note)
+        val count = prefs.candidateCount
         val client = JevClient(prefs)
         val rel = prefs.relationship
         // Knowledge context first (local file reads only, a few ms), then the one
@@ -389,15 +560,37 @@ open class ChatCaptureService : AccessibilityService() {
             }
             main.post {
                 if (!isCurrent(token)) return@post
+                lastAnalyzed = snapshot
+                lastCtx = ctx
                 overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0)
                 submitAnalysis {
-                    val analysis = client.analyze(snapshot, rel, ctx)
+                    val t0 = SystemClock.elapsedRealtime()
+                    val analysis = try {
+                        withHardTimeout(REPLY_TIMEOUT_MS, "回复接口") {
+                            client.analyze(snapshot, rel, ctx, count)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "reply failed after ${SystemClock.elapsedRealtime() - t0}ms: ${e.message}")
+                        null
+                    }
+                    if (analysis != null && analysis.error == null) {
+                        Log.i(TAG, "reply ok after ${SystemClock.elapsedRealtime() - t0}ms ranked=${analysis.rankedReplies.size}")
+                    }
                     main.post {
-                        if (!isCurrent(token)) return@post
+                        if (isCurrent(token)) {
+                            when {
+                                analysis == null -> overlay?.showError("回复接口超时，请重试")
+                                analysis.error != null -> overlay?.showError(analysis.error)
+                                else -> {
+                                    overlay?.showJudgment(analysis)
+                                    overlay?.showReplies(analysis.rankedReplies) { text -> fillInput(token, text) }
+                                }
+                            }
+                        }
+                        // Outside the guard: a stale session must never strand
+                        // analyzing=true — that bricked every later round.
                         analyzing = false
                         analysisTasks.clear()
-                        if (analysis.error != null) overlay?.showError(analysis.error)
-                        else overlay?.showAnalysis(analysis) { text -> fillInput(token, text) }
                     }
                 }
             }
@@ -415,9 +608,10 @@ open class ChatCaptureService : AccessibilityService() {
     private fun ocrCaptureManual() {
         val root = rootInActiveWindow
         val pkg = root?.packageName?.toString() ?: foregroundPkg ?: activePkg ?: ""
-        // WeChat is fully disabled: a manual "截屏识别一次" in WeChat must NOT take
-        // a screenshot — just show the notice (a manual tap always shows it).
-        if (pkg == PKG_WECHAT) { showWeChatDisabled(auto = false); return }
+        // Blocked apps: a manual "截屏识别一次" must NOT take a screenshot there —
+        // just show the notice (a manual tap always shows it).
+        if (isBlocked(pkg)) { showBlocked(auto = false); return }
+        if (pkg in NO_SCREENSHOT_PKGS) { overlay?.showError("这个应用里不使用截屏识别"); return }
         // Top bar text, if this app has one we can read; else the first OCR line.
         val title = root?.let {
             findTitleInActionBar(it, Int.MAX_VALUE, resources.displayMetrics.widthPixels, resources, 0.15, 0.85)
@@ -586,19 +780,21 @@ open class ChatCaptureService : AccessibilityService() {
 
         if (pkg.isNotEmpty() && pkg != activePkg) { activePkg = pkg; lastSignature = "" }
         currentSnapshot = snapshot
+        overlay?.setApp(pkg.ifEmpty { null })
         val sig = snapshot.signature()
         // Manual taps always re-run; the automatic path dedupes like the tree path.
         if (!manual && sig == lastSignature) {
             if (overlay?.isShowing() != true) overlay?.showIdle(snapshot.title)
             return
         }
-        // Same rule as the tree path: past this point the conversation is either
-        // new or being force-refreshed, so drop whatever was shown before.
-        cancelAnalysis()
         lastSignature = sig
-
-        val auto = prefs.ocrAutoAnalyze && prefs.autoAnalyze && snapshot.latestFrom == "other"
+        // Same rule as the tree path: only a first look or a new incoming message
+        // starts an automatic round; scrolling keeps the card as it is.
+        val verdict = gate.observe(snapshot.messages)
+        val fresh = verdict == NewMessageGate.Verdict.FIRST_LOOK || verdict == NewMessageGate.Verdict.NEW_FROM_OTHER
+        val auto = fresh && prefs.ocrAutoAnalyze && prefs.autoAnalyze && snapshot.latestFrom == "other"
         if (manual || auto) {
+            cancelInFlight()
             pendingSnapshot = snapshot
             main.removeCallbacks(debounce)
             runAnalysis()
@@ -706,15 +902,35 @@ open class ChatCaptureService : AccessibilityService() {
     companion object {
         private const val TAG = "JEVASSIST"
 
-        /** WeChat's package. Reading it (node tree / screenshot / OCR) is what
-         *  trips WeChat's anti-screenshot risk control, so it is fully disabled:
-         *  no adapter, no capture, only a one-time "not supported" notice. */
-        private const val PKG_WECHAT = "com.tencent.mm"
+        /** Hard ceiling on one round's HTTP (upstream has one each for its judge
+         *  and reply calls; there is one call here). HttpURLConnection bounds
+         *  connect/read per attempt but NOT DNS resolution, so a wedged lookup
+         *  could hold a round's callback forever (panel stuck on 生成中, every
+         *  later round silently dropped). Deliberately shorter than HttpJson's
+         *  own worst retry tail (~165s). 30s: past that the user would rather
+         *  see "生成超时" with a retry than keep waiting. */
+        private const val REPLY_TIMEOUT_MS = 30_000L
 
-        /** Shown once when the foreground is WeChat. Plain words, full-width
-         *  punctuation; steers the user to a still-supported app. */
-        private const val WECHAT_DISABLED_MSG =
-            "微信已限制读取，请在别的软件上使用"
+        /** Grace period before a "not a chat" read really leaves the conversation. */
+        private const val LEAVE_CONFIRM_MS = 1200L
+
+        /** Apps that are never read: they protect their content against screen
+         *  reading or screenshots, so any capture attempt there is off-limits.
+         *  No adapter, no capture, only a one-time "not supported" notice. */
+        /** Supported apps that are read through the node tree only and never
+         *  screenshotted: no OCR fallback, no manual "截屏识别一次". */
+        private val NO_SCREENSHOT_PKGS = setOf(WhatsAppRules.PACKAGE)
+
+        private val BLOCKED_PKGS = setOf("com.tencent.mm", "cn.soulapp.android")
+
+        /** Shown once per visit to a blocked app. Plain words, full-width
+         *  punctuation; steers the user to a supported app. */
+        private const val BLOCKED_MSG =
+            "这个应用暂不支持，请在别的软件上使用"
+
+        /** How long a transient non-chat foreground must persist before the
+         *  bubble is taken away (#18). */
+        private const val FOREGROUND_CONFIRM_MS = 1500L
 
         /** Whole-screen OCR keeps the middle: no action bar, no input area. */
         private const val TOP_CROP = 0.12f

@@ -7,6 +7,7 @@ Jev 聊天助手是一个三端并行的开源项目，只读屏幕、不注入�
 | 平台 | 仓库 | 主要维护者 |
 |---|---|---|
 | Android（主入口） | [jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis) | [@Finderchangchang](https://github.com/Finderchangchang) |
+| Android 海外版（Jev for WhatsApp） | [jev-chat-jarvis/global](https://github.com/jev-chat/jev-chat-jarvis/tree/main/global) | [@smgonthebeat](https://github.com/smgonthebeat) |
 | macOS | [jev-chat-jarvis-mac](https://github.com/jev-chat/jev-chat-jarvis-mac) | [@eatmoreduck](https://github.com/eatmoreduck) |
 | Windows | [jev-chat-windows](https://github.com/jev-chat/jev-chat-windows) | [@rezoch340](https://github.com/rezoch340) |
 | 三端测试 | 全部仓库 | [@HeiGeAi](https://github.com/HeiGeAi) |
@@ -17,7 +18,7 @@ Jev 聊天助手是一个三端并行的开源项目，只读屏幕、不注入�
 
 | 平台 | 当前覆盖 |
 |---|---|
-| Android | QQ、X / Twitter 私信支持全链路，飞书支持 OCR 兜底；其它未适配 App（微信除外）支持手动「截屏识别一次」 |
+| Android | QQ、X / Twitter 私信支持全链路，飞书支持 OCR 兜底，WhatsApp 一对一聊天（测试中）；其它未适配 App 支持手动「截屏识别一次」 |
 | macOS | 桌面聊天窗口，看屏 + 本地小模型 |
 | Windows | 桌面聊天窗口，窗口截图 + 离线 OCR |
 
@@ -32,6 +33,9 @@ Jev 聊天助手是一个三端并行的开源项目，只读屏幕、不注入�
 ### Android
 
 - [@Finderchangchang](https://github.com/Finderchangchang)
+- [@smgonthebeat](https://github.com/smgonthebeat)：海外版（`global/`）产品负责人，从 0 到 1 构建 Jev for WhatsApp（#73）
+- [@ahxoeh](https://github.com/ahxoeh)：面板稳定性与截屏识别加固（#71）
+- [@xuancanhit99](https://github.com/xuancanhit99)：回复与视觉请求兼容更多网关（#74）
 
 ### macOS
 

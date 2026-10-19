@@ -20,9 +20,8 @@ import com.jev.probe.core.Msg
  *                       adapter names below what proves "we are in a chat".
  * - messages non-empty→ normal capture.
  *
- * The disguised accessibility service (registered as SelectToSpeakService) lets
- * us read the node tree of apps that obfuscate it for normal services (WeChat).
- * Feishu/Lark does not obfuscate, so its adapter reads plain resource-ids.
+ * Adapters only read what the app exposes to an ordinary accessibility service.
+ * An app that hides its node tree or blocks screenshots is not supported.
  */
 interface ChatAppAdapter {
     val pkg: String
@@ -39,8 +38,7 @@ private fun looksLikeTimestamp(t: String): Boolean =
  * Conversation title in the top action bar: the topmost short, roughly centered
  * text above the first message bubble. Constrained so we never grab an in-chat
  * timestamp. Used by QQ as a fallback when its title id is absent, by X, and by
- * the bubble menu's manual OCR capture. WeChat has its own [findWeChatTitle]
- * (group titles need extra filtering this generic version does not do).
+ * the bubble menu's manual OCR capture.
  */
 internal fun findTitleInActionBar(
     root: AccessibilityNodeInfo,
@@ -73,111 +71,6 @@ internal fun findTitleInActionBar(
     return best
 }
 
-/** Chinese sentence punctuation — a real message/announcement line has it, a
- *  title never does. */
-private val WECHAT_TITLE_EXCLUDE_PUNCT = Regex("""[，。？！、]""")
-
-/** A WeChat group title's "(N)" member-count suffix, half- or full-width. */
-private val WECHAT_GROUP_COUNT_SUFFIX = Regex("""[（(]\d+[）)]""")
-
-/**
- * WeChat conversation title (v1.3 fix): a group's pinned announcement or a
- * stray message can sit in the same "topmost, short, centered" search
- * [findTitleInActionBar] does and get mistaken for the title (seen picking up
- * `我有企微，但是用不习惯`, a chat line). A candidate must not read like a
- * sentence (no Chinese punctuation) and must sit above the first bubble; among
- * what is left, a group title's trailing "(N)" member count wins when present.
- * Nothing qualifying → null (the caller's `lastGoodTitle` then carries the
- * previous stable title forward instead of guessing).
- */
-internal fun findWeChatTitle(
-    root: AccessibilityNodeInfo,
-    firstBubbleTop: Int,
-    width: Int,
-    res: Resources
-): String? {
-    val actionBarMax = minOf(firstBubbleTop, (res.displayMetrics.heightPixels * 0.14).toInt())
-    val minCenterX = (width * 0.25).toInt()
-    val maxCenterX = (width * 0.75).toInt()
-    val stack = ArrayDeque<AccessibilityNodeInfo>()
-    stack.addLast(root)
-    var bestPlain: String? = null
-    var bestPlainTop = Int.MAX_VALUE
-    var bestCounted: String? = null
-    var bestCountedTop = Int.MAX_VALUE
-    var guard = 0
-    while (stack.isNotEmpty() && guard < 5000) {
-        guard++
-        val node = stack.removeLast()
-        val text = node.text?.toString()
-        if (!text.isNullOrBlank() && text.length <= 24 && !looksLikeTimestamp(text) &&
-            !WECHAT_TITLE_EXCLUDE_PUNCT.containsMatchIn(text)
-        ) {
-            val b = Rect(); node.getBoundsInScreen(b)
-            if (b.bottom in 1 until actionBarMax && b.bottom < firstBubbleTop &&
-                b.centerX() in minCenterX..maxCenterX
-            ) {
-                if (WECHAT_GROUP_COUNT_SUFFIX.containsMatchIn(text)) {
-                    if (b.top < bestCountedTop) { bestCountedTop = b.top; bestCounted = text }
-                } else if (b.top < bestPlainTop) { bestPlainTop = b.top; bestPlain = text }
-            }
-        }
-        for (i in node.childCount - 1 downTo 0) node.getChild(i)?.let { stack.addLast(it) }
-    }
-    return bestCounted ?: bestPlain
-}
-
-/** WeChat (com.tencent.mm). Message bubbles carry a stable id; sender side is
- *  the bubble's horizontal position (right = me, left = other).
- *
- *  "In a chat window" = a `id/bkl` bubble container exists (even with its text
- *  stripped by the obfuscation) — nothing else counts, so a list screen's
- *  editable search box can no longer pass for a chat window (v1.3 fix: it was
- *  triggering OCR fallback on the conversation list). WeChat 8.0.52+ hides
- *  node text from ordinary services, so an empty read here (a `bkl` with no
- *  text) is exactly the case OCR fallback exists for. */
-class WeChatAdapter : ChatAppAdapter {
-    override val pkg = "com.tencent.mm"
-
-    override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
-        val width = res.displayMetrics.widthPixels
-        val bubbles = ArrayList<Triple<Int, Int, String>>() // top, centerX, text
-        var firstBubbleTop = Int.MAX_VALUE
-        var isChat = false
-
-        val stack = ArrayDeque<AccessibilityNodeInfo>()
-        stack.addLast(root)
-        var guard = 0
-        while (stack.isNotEmpty() && guard < 5000) {
-            guard++
-            val node = stack.removeLast()
-            val id = node.viewIdResourceName
-            val text = node.text?.toString()
-            if (id == BUBBLE_ID) {
-                isChat = true
-                if (!text.isNullOrBlank()) {
-                    val b = Rect(); node.getBoundsInScreen(b)
-                    bubbles.add(Triple(b.top, b.centerX(), text))
-                    if (b.top < firstBubbleTop) firstBubbleTop = b.top
-                }
-            }
-            for (i in node.childCount - 1 downTo 0) node.getChild(i)?.let { stack.addLast(it) }
-        }
-        val title = findWeChatTitle(root, firstBubbleTop, width, res)
-        // In a chat but nothing readable → empty snapshot, the OCR fallback cue.
-        if (bubbles.isEmpty()) return if (isChat) ChatSnapshot(title, emptyList()) else null
-        bubbles.sortBy { it.first }
-        val msgs = bubbles.map { (_, cx, text) ->
-            Msg(if (cx > width / 2) "me" else "other", text)
-        }
-        return ChatSnapshot(title, msgs)
-    }
-
-    companion object {
-        private const val BUBBLE_ID = "com.tencent.mm:id/bkl"
-    }
-}
-
 /**
  * Mobile QQ (com.tencent.mobileqq). Nodes are NOT obfuscated (verified on QQ
  * 9.3.50 / Xiaomi 14, 1200x2670): message bodies are plain TextViews carrying
@@ -202,6 +95,10 @@ class QQAdapter : ChatAppAdapter {
         // top, left, right, text
         val bubbles = ArrayList<Bubble>()
         var firstBubbleTop = Int.MAX_VALUE
+        // Top of the first message row, nickname included: the title fallback must
+        // stay above it, or a group member's nickname right under the top bar gets
+        // taken for the chat title while QQ re-lays out its list during a scroll.
+        var firstContentTop = Int.MAX_VALUE
         var title: String? = null
         var hasInput = false
 
@@ -218,13 +115,17 @@ class QQAdapter : ChatAppAdapter {
                 bubbles.add(Bubble(b.top, b.left, b.right, text))
                 if (b.top < firstBubbleTop) firstBubbleTop = b.top
             }
+            if (id == NICK_ID) {
+                val b = Rect(); node.getBoundsInScreen(b)
+                if (b.top < firstContentTop) firstContentTop = b.top
+            }
             if (!hasInput && id == INPUT_ID) hasInput = true
             if (id == TITLE_ID && title == null) text?.let { if (it.isNotBlank()) title = it }
             for (i in node.childCount - 1 downTo 0) node.getChild(i)?.let { stack.addLast(it) }
         }
         if (bubbles.isEmpty() && !hasInput) return null
 
-        if (title == null) title = findTitleInActionBar(root, firstBubbleTop, width, res)
+        if (title == null) title = findTitleInActionBar(root, minOf(firstBubbleTop, firstContentTop), width, res)
         if (bubbles.isEmpty()) return ChatSnapshot(title, emptyList())
 
         val avatarEdge = (width * 0.13).toInt()
@@ -242,6 +143,7 @@ class QQAdapter : ChatAppAdapter {
     companion object {
         private const val BUBBLE_ID = "com.tencent.mobileqq:id/mjn"
         private const val TITLE_ID = "com.tencent.mobileqq:id/371"
+        private const val NICK_ID = "com.tencent.mobileqq:id/mjq"
         private const val INPUT_ID = "com.tencent.mobileqq:id/input"
     }
 }

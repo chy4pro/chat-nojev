@@ -123,8 +123,12 @@ val SCENARIOS = listOf(
         mapOf("reply_a" to 0.40, "reply_b" to 0.35, "reply_c" to 0.25)),
     Scn("winner_is_reply_c", "赢家是第三条：验键到下标的映射", C3, "reply_c",
         mapOf("reply_a" to 0.20, "reply_b" to 0.30, "reply_c" to 0.50)),
-    Scn("two_candidates_only", "模型只给两条：两边都补足三条（占位文案相同）", C2, "reply_b",
-        mapOf("reply_a" to 0.35, "reply_b" to 0.65)),
+    // jev-chat-jarvis v1.7 起不再把候选补足三条，但排序题 rankQuestion 还 require 恰好三条：
+    // 两条候选时排序抛异常，被 JevClient 吞成空列表，面板一条候选都没有（它自己「2 条」的
+    // 设置每一轮都这样）。这一版没有单独的排序题，两条照常排。判断那几项两边一致。
+    Scn("two_candidates_only", "模型只给两条：jev-chat-jarvis 排序抛异常、一条都不显示；我们两条照常排", C2, "reply_b",
+        mapOf("reply_a" to 0.35, "reply_b" to 0.65),
+        expectDiff = listOf("rankedReplies")),
     Scn("boundary_values_low", "边界值：danger_level 0，noul 全 0.0", C3, "reply_a",
         mapOf("reply_a" to 1.0, "reply_b" to 0.0, "reply_c" to 0.0),
         judgment(
@@ -142,8 +146,10 @@ val SCENARIOS = listOf(
             "danger_level" to mapOf("score" to 9, "confidence" to 1.0,
                 "probabilities" to mapOf("8" to 0.0, "9" to 1.0)))),
     Scn("ranking_block_missing", "排序整块都没有：两边都全记 0、顺序不动", C3, null, null),
-    Scn("choice_names_missing_candidate", "点名的候选不存在（只有两条却点 reply_c）", C2, "reply_c",
-        mapOf("reply_a" to 0.40, "reply_b" to 0.60)),
+    // 同上：只有两条候选，jev-chat-jarvis 那边走不到「点名的候选不存在」这一步就在排序里抛了。
+    Scn("choice_names_missing_candidate", "点名的候选不存在（只有两条却点 reply_c）；两条候选时 jev-chat-jarvis 一条都不显示", C2, "reply_c",
+        mapOf("reply_a" to 0.40, "reply_b" to 0.60),
+        expectDiff = listOf("rankedReplies")),
     Scn("probabilities_not_normalized", "分加起来不是 1：两边都原样递下去", C3, "reply_b",
         mapOf("reply_a" to 2.0, "reply_b" to 5.0, "reply_c" to 3.0)),
     Scn("score_out_of_range", "紧张度 11（题目只有 0..9）：不夹范围，原样递下去", C3, "reply_b",
@@ -177,8 +183,12 @@ val SCENARIOS = listOf(
     // 注入过滤可以把候选全扔掉。上游那边起草那次调用的正文只有候选，抠不出来就是抠不出来；
     // 合并之后同一段文本里还躺着判断，逐行兜底会把 JSON 自己的花括号当候选抠出来。
     // Windows 那棵树就是这么中招的（已修），这里盯着 Android 别走上同一条路。
-    Scn("all_candidates_filtered_out", "候选被过滤光：兜底不许把判断那段文本当候选抠出来", emptyList(), "reply_b",
-        mapOf("reply_a" to 0.3, "reply_b" to 0.5, "reply_c" to 0.2))
+    // jev-chat-jarvis v1.7 的 parseN 对 `[]` 解析出零条后走逐行兜底，只滤掉单独的 `[`、`]`，
+    // 于是把字面 "[]" 当成一条候选、100% 显示在面板上。这一版：对象里 replies 是空数组就是
+    // 零条，面板显示「（未生成候选回复）」。判断那几项两边一致。
+    Scn("all_candidates_filtered_out", "候选被过滤光：jev-chat-jarvis 显示一条「[]」，我们一条都不显示", emptyList(), "reply_b",
+        mapOf("reply_a" to 0.3, "reply_b" to 0.5, "reply_c" to 0.2),
+        expectDiff = listOf("rankedReplies"))
 )
 
 // ---------------------------------------------------------------------------

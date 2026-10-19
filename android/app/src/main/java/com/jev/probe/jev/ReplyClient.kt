@@ -22,27 +22,43 @@ import org.json.JSONObject
 class ReplyClient(private val prefs: Prefs) {
 
     /**
-     * The 7 judgment questions, 3 candidate replies and their ranking, in one
-     * call. Errors are returned inside [Analysis.error], not thrown — upstream's
+     * The 7 judgment questions, [count] candidate replies (1..3) and their
+     * ranking, in one call. The replies are in the language of the other
+     * person's latest message (English chats get English replies). [avoid] holds
+     * replies already shown for this chat ("换一组"), which the model must not
+     * repeat. Errors are returned inside [Analysis.error], not thrown — upstream's
      * judgment call had the same contract, and it is now the only call there is.
      *
      * @param ctx D-stage knowledge context. When present its background and
      *        history are prepended to the prompt with an instruction to stay
      *        consistent with them and invent nothing beyond them.
      */
-    fun draftAndJudge(snapshot: ChatSnapshot, relationship: String, ctx: ChatContext? = null): Analysis {
+    fun draftAndJudge(
+        snapshot: ChatSnapshot,
+        relationship: String,
+        ctx: ChatContext? = null,
+        count: Int = 3,
+        avoid: List<String> = emptyList()
+    ): Analysis {
         val start = System.currentTimeMillis()
+        val n = count.coerceIn(1, 3)
         return try {
             val convo = snapshot.messages.takeLast(10).joinToString("\n") {
                 (if (it.side == "me") "我" else "对方") + "：" + it.text
             }
             val user = knowledgeBlock(relationship, ctx) +
                 "关系：$relationship\n\n最近对话：\n$convo\n\n" +
-                "请给出那一个 JSON 对象，字段按 judgment → replies → best_reply → reply_scores 的顺序写：" +
-                "judgment 给 7 个字段，replies 恰好 3 条，best_reply 点名其中一条，" +
-                "reply_scores 给每条一个 0~1 的分。"
-            MergedAnswer.parse(chat(system(), user, temperature = 0.8),
-                System.currentTimeMillis() - start)
+                (if (avoid.isEmpty()) "" else
+                    "下面这些回复已经给过，不要重复，也不要只是换个说法：\n" + avoid.joinToString("\n") { "- $it" } + "\n\n") +
+                (if (n > 1)
+                    "请给出那一个 JSON 对象，字段按 judgment → replies → best_reply → reply_scores 的顺序写：" +
+                        "judgment 给 7 个字段，replies 恰好 $n 条，best_reply 点名其中一条，" +
+                        "reply_scores 给每条一个 0~1 的分。"
+                else
+                    "请给出那一个 JSON 对象，字段按 judgment → replies 的顺序写：" +
+                        "judgment 给 7 个字段，replies 恰好 1 条。")
+            MergedAnswer.parse(chat(system(n), user, temperature = if (avoid.isEmpty()) 0.8 else 0.95),
+                System.currentTimeMillis() - start, n)
         } catch (e: Exception) {
             Log.w(TAG, "draftAndJudge failed: ${e.message}")
             Analysis(null, null, null, null, null, null, null, emptyList(),
@@ -57,30 +73,42 @@ class ReplyClient(private val prefs: Prefs) {
      * there).
      *
      * Field order is part of the contract, and `judgment` comes first on
-     * purpose: the model writes the object left to right, so the three
-     * candidates are produced after — and conditioned on — the judgment it has
-     * just written. That is what upstream gets by feeding its judgment call's
+     * purpose: the model writes the object left to right, so the candidates
+     * are produced after — and conditioned on — the judgment it has just
+     * written. That is what upstream gets by feeding its judgment call's
      * result into the drafting call. [MergedAnswer] reads by key, so nothing
      * downstream depends on the order.
+     *
+     * With one candidate there is nothing to rank — upstream skips its ranking
+     * round then — so `best_reply` / `reply_scores` are not asked for.
      */
-    private fun system(): String =
-        "你是中文即时通讯回复助手。先读完整段对话把 judgment 那 7 个字段答完，再据此写 3 条候选回复，" +
-            "三条策略要有区别（例如：一条稳妥承接、一条给具体行动或承诺、一条简短低姿态）。" +
-            "每条不超过 40 字，口语、自然、像真人在聊天软件里发消息。\n" +
+    private fun system(n: Int): String {
+        val keys = JevQuestions.REPLY_KEYS.take(n)
+        val howMany = if (n == 2) "两" else "三"
+        val ranking = if (n > 1)
+            "- \"best_reply\"：" + keys.joinToString(" / ") { "\"$it\"" } + " 之一，" +
+                "它们依次对应 replies 里的第 " + (1..n).joinToString("、") + " 条；\n" +
+                "- \"reply_scores\"：对象，键就是上面那${howMany}个，值是 0 到 1 之间的小数，" +
+                "${howMany}个加起来等于 1。\n"
+        else ""
+        return "你是即时通讯回复助手。先读完整段对话把 judgment 那 7 个字段答完，再据此写 $n 条候选回复，" +
+            (if (n > 1) "各条策略要有区别（例如：一条稳妥承接、一条给具体行动或承诺、一条简短低姿态）。"
+             else "给出最稳妥、最自然的一条。") +
+            "回复语言跟随对方最近一条消息：对方用英文就用自然的英文回复，用中文就用中文回复。" +
+            "每条不超过 40 字（英文不超过 30 个单词），口语、自然、像真人在聊天软件里发消息。\n" +
             "输出：只输出一个 JSON 对象，别的什么都别写——不要 Markdown 围栏，不要解释，不要前言后语。\n" +
             "字段必须按下面的先后顺序写出来，不要调换：\n" +
             "- \"judgment\"：对象，下面 7 个字段各给一条。字段名和分数档位必须一字不差照抄下面的说明；" +
             "choice 那几道题答的是一句短语（按下面的说明，用对话那门语言写），不是英文 key；" +
             "哪一条你判断不出来就把那一条整个省掉，不要填 null、不要瞎猜。\n" +
-            "- \"replies\"：恰好 3 个字符串的数组，就是上面那 3 条消息本身，不要编号、不要前缀。" +
-            "这 3 条必须顺着你在 judgment 里刚写下的 best_action（建议动作）、true_intent（对方真实意图）" +
-            "和 she_needs（对方要什么）来写，不要和它们打架；\n" +
-            "- \"best_reply\"：\"reply_a\" / \"reply_b\" / \"reply_c\" 之一，" +
-            "它们依次对应 replies 里的第 1、2、3 条；\n" +
-            "- \"reply_scores\"：对象，键就是上面那三个，值是 0 到 1 之间的小数，三个加起来等于 1。\n" +
+            "- \"replies\"：恰好 $n 个字符串的数组，就是上面那 $n 条消息本身，不要编号、不要前缀。" +
+            "这 $n 条必须顺着你在 judgment 里刚写下的 best_action（建议动作）、true_intent（对方真实意图）" +
+            "和 she_needs（对方要什么）来写，不要和它们打架" + (if (n > 1) "；\n" else "。\n") +
+            ranking +
             "所有字符串用双引号，不要有尾逗号，不要写注释。\n\n" +
-            "判断说明（judgment 那 7 个字段照这里答；说明是英文的，聊天内容仍然是中文）：\n\n" +
-            JevQuestions.renderJudgmentSpec()
+            "判断说明（judgment 那 7 个字段照这里答；说明是英文的，聊天内容仍然是对话原本的语言）：\n\n" +
+            JevQuestions.renderJudgmentSpec(replies = n)
+    }
 
     /** The background + history preamble; empty string when there is no context. */
     private fun knowledgeBlock(relationship: String, ctx: ChatContext?): String {
@@ -128,6 +156,7 @@ class ReplyClient(private val prefs: Prefs) {
             .put("model", prefs.replyModel)
             .put("messages", messages)
             .put("temperature", temperature)
+            .put("stream", false)
         val resp = HttpJson.post(url, prefs.effectiveReplyKey(), body, Route.REPLY, HttpJson.headersFor(url))
         return resp.optJSONArray("choices")?.optJSONObject(0)
             ?.optJSONObject("message")?.optString("content") ?: ""

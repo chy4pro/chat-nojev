@@ -15,7 +15,7 @@ import org.json.JSONObject
  *
  * 1. **Parsing.** Digging the JSON object out of whatever the model wrote —
  *    a code fence, a preamble, a truncated object, or no JSON at all (then the
- *    line-by-line fallback upstream's ReplyClient used, padding included).
+ *    line-by-line fallback upstream's ReplyClient uses).
  * 2. **Translation.** Moving the values into the three answer shapes the
  *    judgment API answered in (`noul` / `choice` / `score`, plus the
  *    `best_reply` ranking block), and then running the *same* parse functions
@@ -60,16 +60,15 @@ object MergedAnswer {
         }.toMap()
     }
 
-    /** What upstream's ReplyClient padded a short candidate list with. */
-    private const val PAD = "（稍等，我看下）"
-
     /**
      * @param content the raw assistant message.
      * @param latencyMs how long the one call took, for [Analysis.latencyMs].
+     * @param n how many candidates were asked for; more than that are dropped,
+     *        as upstream's ReplyClient drops them.
      */
-    fun parse(content: String, latencyMs: Long): Analysis {
+    fun parse(content: String, latencyMs: Long, n: Int = 3): Analysis {
         val obj = jsonObject(content)
-        val candidates = replies(obj, content)
+        val candidates = replies(obj, content, n)
         val answers = judgment(obj)
         return Analysis(
             trueIntent = parseChoice(answers.optJSONObject("true_intent")),
@@ -106,51 +105,43 @@ object MergedAnswer {
      * The candidate replies: the object's `replies` array when it parsed, else
      * upstream's own text fallback over the whole answer.
      *
-     * The list is padded to 3 with [PAD] exactly as upstream's
-     * `ReplyClient.parseThree` padded it, so a model that writes fewer replies
-     * than it was asked for produces the same three cards it does upstream.
+     * Up to [n], never padded: upstream's `ReplyClient.parseN` returns fewer
+     * when the model gave fewer, so a model that writes fewer replies than it
+     * was asked for produces the same, shorter list of cards it does upstream.
      */
-    fun replies(obj: JSONObject, content: String): List<String> {
+    fun replies(obj: JSONObject, content: String, n: Int = 3): List<String> {
         val raw = obj.optJSONArray("replies")
         // An empty array is an answer, not a missing one: the object parsed and the
-        // model said "no replies". Falling through to parseThree here would scrape
+        // model said "no replies". Falling through to parseN here would scrape
         // the judgment half of the same response for candidates — upstream's
         // fallback only ever saw candidates, ours sees the whole merged object.
-        // Padding an empty list gives the same three cards upstream gives for `[]`.
         if (raw != null) {
             val out = ArrayList<String>()
-            // Trimmed and kept as they come, blanks included: upstream's reader
-            // of the bare array did the same, and dropping one here would be
-            // this layer deciding the model wrote one reply fewer than it did.
-            for (i in 0 until raw.length()) out.add(raw.optString(i).trim())
-            return pad(out.take(3))
+            // Trimmed, blanks dropped, at most n: what upstream's reader of the
+            // bare array does to it.
+            for (i in 0 until raw.length()) raw.optString(i).trim().takeIf { it.isNotEmpty() }?.let { out.add(it) }
+            return out.take(n)
         }
-        return parseThree(content)
+        return parseN(content, n)
     }
 
-    /** Upstream `ReplyClient.parseThree`, unchanged: the bare-array answer, then
-     *  the line-by-line fallback, then the padding. */
-    private fun parseThree(content: String): List<String> {
+    /** Upstream `ReplyClient.parseN`, unchanged: the bare-array answer, then
+     *  the line-by-line fallback. */
+    private fun parseN(content: String, n: Int): List<String> {
         val start = content.indexOf('[')
         val end = content.lastIndexOf(']')
         if (start >= 0 && end > start) {
             try {
                 val arr = JSONArray(content.substring(start, end + 1))
                 val out = ArrayList<String>()
-                for (i in 0 until arr.length()) out.add(arr.getString(i).trim())
-                if (out.size >= 3) return out.take(3)
-                return pad(out)
+                for (i in 0 until arr.length()) arr.optString(i).trim().takeIf { it.isNotEmpty() }?.let { out.add(it) }
+                if (out.isNotEmpty()) return out.take(n)
             } catch (_: Exception) { }
         }
-        val lines = content.split("\n").map { it.trim().trimStart('-', '*', '1', '2', '3', '.', ' ', '"') }
-            .filter { it.isNotBlank() }
-        return pad(lines.take(3))
-    }
-
-    private fun pad(items: List<String>): List<String> {
-        val out = items.toMutableList()
-        while (out.size < 3) out.add(PAD)
-        return out
+        // Fallback: split lines.
+        return content.split("\n").map { it.trim().trimStart('-', '*', '1', '2', '3', '.', ' ', '"').trimEnd('"', ',') }
+            .filter { it.isNotBlank() && it != "[" && it != "]" }
+            .take(n)
     }
 
     // --------------------------------------------------------- translation

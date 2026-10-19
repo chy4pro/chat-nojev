@@ -23,7 +23,7 @@
 
 三个变体各发了 `v0.2.0`，由仓库自己的 workflow 在 GitHub 的 runner 上编译、打包、发布，**没有一个在真机上跑过**——装之前先看一眼[用之前要知道的](#用之前要知道的)。
 
-`v0.2.0` 对应 jev-chat 各自的最新版：jev-chat-windows v0.1.11、jev-chat-jarvis v1.4、jev-chat-jarvis-mac v0.6.0（2026-09-26 同步，对齐到哪个 commit 见 [`docs/UPSTREAM.md`](docs/UPSTREAM.md)）。Releases 里的 `v0.1.0` 是 2026-09-22 建仓时的代码，别装那个。
+`v0.2.0` 这三个包是 2026-09-26 的代码，对应 jev-chat-windows v0.1.11、jev-chat-jarvis v1.4、jev-chat-jarvis-mac v0.6.0。源码在 2026-10-19 又同步到了 jev-chat-windows v0.1.12（韩文界面、KakaoTalk）、jev-chat-jarvis v1.7（WhatsApp 一对一、QQ 群聊修正）、jev-chat-jarvis-mac v0.6.2，还没有重新打包；对齐到哪个 commit 见 [`docs/UPSTREAM.md`](docs/UPSTREAM.md)。Releases 里的 `v0.1.0` 是 2026-09-22 建仓时的代码，别装那个。
 
 ### Windows
 
@@ -123,12 +123,13 @@ bash   tools/equivalence_check_android.sh --upstream /path/to/jev-chat-jarvis --
 - `max_tokens` 400 → 1600（思考模式 4000 → 5200）；`core/llm.py` 加了 JSON 模式，默认关着。
 - key 的回退改成认来源了——**修原版的毛病**：只设了 DeepSeek key 却选别家，原版会把 key 发给别家。代价是那种情况现在报「未配置」。
 - `docs/KICKOFF.md` 被就地改了；`docs/*.png` 截图没重拍，跟现在的面板对不上。
+- 韩文界面下，那三道选择题照样显示模型写的那句，不经过原版 i18n 里的标签翻译（这一版没有英文 key 可翻）。
 - `probe/probe_laya*.py` 三个探针删了：它们只为「本地决策模型能不能替掉 Jev」那项调研存在，import 的排序题这里已经没有了。
 
 **Android**（[详版](docs/MERGE.md#android)）
 
 - 应用 id 和启动器名字改了（见[上一节](#用之前要知道的)），无障碍服务的组件名跟着改成动态拼的。
-- 签名配置不再默认指向一个 Windows 路径——**修原版的 bug**，不修则非 Windows 机器上连未签名 release 都打不出来，也就没有那个 APK。
+- jev-chat-jarvis v1.7 的两个新问题这一版没有：两条候选时它的排序抛异常、面板一条候选都不显示；空回答会被当成一条字面的「[]」候选。两处都在这一版换成一次调用的那段代码里。
 - `gradlew` 补上了可执行位；版本号不跟原版，从 `0.1.0` 起自己编（现在 `0.2.0`）；`apk/` 目录没有跟着拷过来。
 - 顺带改对了原版 README 的一处笔误：危险等级是 0–9，不是 1–9。
 - App 里「隐私政策」和「开源仓库」两个按钮指本仓库，不指 chatjevs.com 和原版仓库（原版那页隐私政策写的是它的两路接口）；`PRIVACY.md` 按一次调用改写了。
@@ -139,10 +140,11 @@ bash   tools/equivalence_check_android.sh --upstream /path/to/jev-chat-jarvis --
 - 候选的百分比从「跨话术可比」变成「话术内占比」；面板实际用的排序没变。
 - 判断适配器里的兜底挪到了面板（`src/hud.py`），坏数据两边显示不同，5 处记在 `macos/docs/EQUIVALENCE.md`；顺带修掉 `float(value or 0.0)` 碰上非数字会带走 UI 线程的隐患。
 - 判断不再抢在候选前面上屏，「一半成功一半失败」也不再可能。
-- 输出预算 300 → 900 + 150 × 每话术候选数（默认 2 条即 1200）；版本号不跟原版（现在 `0.2.0`）；`torch` / `transformers` / `huggingface-hub` / `laya` 从依赖删了，但 `uv.lock` 是原版 0.6.0 那一份，还锁着它们——**已知的不一致**。
+- 输出预算 300 → 900 + 150 × 每话术候选数（默认 2 条即 1200）；版本号不跟原版（现在 `0.2.0`）；`torch` / `transformers` / `huggingface-hub` / `laya` 从依赖删了，但 `uv.lock` 是原版 0.6.2 那一份，还锁着它们——**已知的不一致**。
 - 原版「换话术」「重新生成」时会把上一次判断出的意图喂给生成；这一版候选写在判断前面，那两条路一律不带意图。
 - 原版给本地判断模型加的首次引导（选在线还是离线）、下载进度、国内镜像，跟着本地模型一起不存在。
 - 没有内置共享 key：原版打包时带着它作者那台中转的 token，不配 key 就走过去（明文 HTTP）；这一版留空，不配 key 就弹窗，聊天内容只发给你自己配的端点。
+- 没有 Homebrew 安装：原版的发版脚本会推送它自己的 tap（装的是原版），这一版把那一段删了。
 
 ## jev-chat 与致谢
 

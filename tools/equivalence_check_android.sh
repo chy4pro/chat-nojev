@@ -44,6 +44,9 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$UPSTREAM" ] || { echo "要给 --upstream <上游那棵树> 或设 UPSTREAM_TREE" >&2; exit 2; }
+# 2026-10-06 起 jev-chat-jarvis 把国内版挪进了 cn/（海外版在 global/，跟这个变体无关）。
+# 给仓库根或 cn/ 都行：根下没有 app/ 而 cn/app 在，就用 cn/。
+if [ ! -d "$UPSTREAM/app" ] && [ -d "$UPSTREAM/cn/app" ]; then UPSTREAM="$UPSTREAM/cn"; echo "上游国内版在 cn/：$UPSTREAM"; fi
 [ -n "$PROBE" ] || { echo "要给 --probe <带 jdk/kotlinc/org.json.jar 的目录> 或设 ANDROID_PROBE" >&2; exit 2; }
 
 JDK="$(echo "$PROBE"/jdk/jdk-*)"

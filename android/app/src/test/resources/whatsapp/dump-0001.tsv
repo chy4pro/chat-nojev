@@ -1,0 +1,118 @@
+# WhatsApp 2.26.38.73 screen recorded by @smgonthebeat (#73) from a test chat between two test accounts.
+# i	parent	childIndex	id	left,top,right,bottom	scrollable	text
+0	-1	0		0,0,1440,3168	0	
+1	0	0		0,0,1440,3168	0	
+2	1	0		0,0,1440,3168	0	
+3	2	0	com.whatsapp:id/action_bar_root	0,0,1440,3168	0	
+4	3	0	android:id/content	0,0,1440,3168	0	
+5	4	0	com.whatsapp:id/root	0,0,1440,3168	0	
+6	5	0	com.whatsapp:id/conversation_root_layout	0,160,1440,3104	0	
+7	6	0	com.whatsapp:id/search_fragment_and_toolbar_holder	0,160,1440,384	0	
+8	7	0	com.whatsapp:id/toolbar	0,160,1440,384	0	
+9	8	0	com.whatsapp:id/custom_view	0,160,896,384	0	
+10	9	0	com.whatsapp:id/back	0,176,384,368	0	
+11	10	0	com.whatsapp:id/whatsapp_toolbar_home	0,176,192,368	0	
+12	10	1	com.whatsapp:id/contact_photo_view	192,176,384,368	0	
+13	12	0	com.whatsapp:id/conversation_contact_photo	202,194,358,350	0	
+14	12	1	com.whatsapp:id/transition_start	208,192,368,352	0	
+15	9	1	com.whatsapp:id/conversation_contact	384,160,896,384	0	
+16	15	0		400,190,896,281	0	
+17	16	0	com.whatsapp:id/conversation_contact_name	400,190,588,281	0	
+18	15	1	com.whatsapp:id/conversation_contact_status_holder	400,281,896,346	0	
+19	18	0	com.whatsapp:id/conversation_contact_status	400,281,524,346	0	
+20	18	1		524,281,896,285	0	
+21	8	1		896,160,1440,384	0	
+22	21	0		896,176,1088,368	0	
+23	21	1		1088,176,1280,368	0	
+24	21	2	com.whatsapp:id/menuitem_overflow	1280,176,1440,368	0	
+25	6	1	com.whatsapp:id/coordinator	0,384,1440,3104	0	
+26	25	0	com.whatsapp:id/conversation_background	0,384,1440,3104	0	
+27	25	1	com.whatsapp:id/conversation_layout	0,384,1440,3104	0	
+28	27	0	com.whatsapp:id/transition_clipper_top	0,384,1440,384	0	
+29	27	1	com.whatsapp:id/push_to_video_stub	0,384,1440,3104	0	
+30	27	2	com.whatsapp:id/drag_n_drop_overlay	0,384,1440,3104	0	
+31	27	3	android:id/content	0,384,1440,2882	0	
+32	31	0	android:id/list	0,384,1440,2882	1	
+33	32	0	com.whatsapp:id/conversation_row_image	0,384,1440,1327	0	
+34	33	0	com.whatsapp:id/main_layout	68,384,1004,1322	0	
+35	34	0	com.whatsapp:id/media_container_wrapper	68,384,1004,1322	0	
+36	35	0	com.whatsapp:id/media_container	68,384,1004,1322	0	
+37	36	0	com.whatsapp:id/image	84,384,988,1306	0	
+38	34	1	com.whatsapp:id/text_and_date	68,1229,1004,1294	0	
+39	38	0	com.whatsapp:id/date_wrapper	804,1229,1004,1294	0	
+40	39	0	com.whatsapp:id/date	844,1229,964,1294	0	06:55
+41	33	1		1036,609,1164,737	0	
+42	41	0	com.whatsapp:id/action_button	1036,609,1164,737	0	
+43	32	1	com.whatsapp:id/conversation_row_voice_note	0,1327,1440,1585	0	
+44	43	0	com.whatsapp:id/main_layout	68,1332,1212,1580	0	
+45	44	0		68,1332,1212,1580	0	
+46	45	0		68,1332,948,1580	0	
+47	46	0		68,1332,948,1580	0	
+48	47	0	com.whatsapp:id/conversation_row_audio_player_view	68,1332,948,1580	0	
+49	48	0	com.whatsapp:id/control_button_container	84,1332,300,1548	0	
+50	49	0	com.whatsapp:id/control_btn	84,1332,300,1548	0	
+51	48	1	com.whatsapp:id/controls	300,1332,948,1548	0	
+52	51	0	com.whatsapp:id/audio_seekbar	300,1332,948,1548	0	
+53	51	1	com.whatsapp:id/audio_visualizer	300,1392,948,1488	0	
+54	47	1		68,1503,948,1580	0	
+55	54	0	com.whatsapp:id/description	300,1503,816,1580	0	0:02
+56	54	1	com.whatsapp:id/date_wrapper	828,1503,948,1580	0	
+57	56	0	com.whatsapp:id/date	828,1503,948,1568	0	06:55
+58	45	1	com.whatsapp:id/conversation_row_voice_note_profile_avatar	948,1360,1180,1552	0	
+59	58	0	com.whatsapp:id/picture_frame	948,1360,1180,1552	0	
+60	59	0	com.whatsapp:id/picture	980,1360,1180,1552	0	
+61	58	1	com.whatsapp:id/mic_overlay	972,1463,1029,1552	0	
+62	32	2	com.whatsapp:id/conversation_row_text	0,1585,1440,2190	0	
+63	62	0	com.whatsapp:id/main_layout	68,1590,1212,2170	0	
+64	63	0	com.whatsapp:id/conversation_text_row	68,1590,1212,2170	0	
+65	64	0	com.whatsapp:id/message_text	76,1598,1204,2162	0	Just to recap what we agreed on the call. First, the draft goes to the client on Monday. Second, I will send you the figures tomorrow morning. Third, we review everything together on Wednesday afternoon. Let me know if I missed anything.
+66	64	1	com.whatsapp:id/date_wrapper	1036,2097,1204,2162	0	
+67	66	0	com.whatsapp:id/date	1060,2097,1180,2162	0	06:56
+68	32	3	com.whatsapp:id/conversation_row_text	0,2190,1440,2360	0	
+69	68	0	com.whatsapp:id/main_layout	491,2210,1372,2340	0	
+70	69	0	com.whatsapp:id/conversation_text_row	491,2210,1372,2340	0	
+71	70	0	com.whatsapp:id/message_text	499,2218,1136,2332	0	Sounds good to me.
+72	70	1	com.whatsapp:id/date_wrapper	1136,2263,1356,2332	0	
+73	72	0	com.whatsapp:id/date	1136,2263,1256,2328	0	06:56
+74	72	1	com.whatsapp:id/status	1256,2271,1336,2319	0	
+75	32	4	com.whatsapp:id/conversation_row_text	0,2360,1440,2530	0	
+76	75	0	com.whatsapp:id/main_layout	68,2380,1049,2510	0	
+77	76	0	com.whatsapp:id/conversation_text_row	68,2380,1049,2510	0	
+78	77	0	com.whatsapp:id/message_text	76,2388,709,2502	0	See you Wednesday
+79	77	1	com.whatsapp:id/date_wrapper	709,2437,1041,2502	0	
+80	79	0	com.whatsapp:id/edit_label	733,2437,897,2502	0	已编辑
+81	79	1	com.whatsapp:id/date	897,2437,1017,2502	0	06:56
+82	32	5		0,2530,1440,2712	0	
+83	82	0	com.whatsapp:id/main_layout	512,2550,1372,2692	0	
+84	83	0		512,2550,1372,2692	0	
+85	84	0	com.whatsapp:id/icon	512,2550,640,2686	0	
+86	84	1		640,2550,1372,2692	0	
+87	86	0	com.whatsapp:id/message_text	640,2550,1216,2684	0	你已删除这条消息
+88	86	1	com.whatsapp:id/date_wrapper	1216,2615,1356,2684	0	
+89	88	0	com.whatsapp:id/date	1216,2615,1336,2680	0	<TOPBAR>
+90	32	6	com.whatsapp:id/conversation_row_text	0,2712,1440,2882	0	
+91	90	0	com.whatsapp:id/main_layout	68,2732,898,2862	0	
+92	91	0	com.whatsapp:id/conversation_text_row	68,2732,898,2862	0	
+93	92	0	com.whatsapp:id/message_text	76,2740,722,2854	0	Thanks, speak soon.
+94	92	1	com.whatsapp:id/date_wrapper	722,2789,890,2854	0	
+95	94	0	com.whatsapp:id/date	746,2789,866,2854	0	<TOPBAR>
+96	27	4	com.whatsapp:id/footer_container	0,2882,1440,2882	0	
+97	27	5	com.whatsapp:id/transition_clipper_bottom	0,2882,1440,2882	0	
+98	27	6	com.whatsapp:id/footer	0,2882,1440,3104	0	
+99	98	0	com.whatsapp:id/emoji_popup_anchor	0,2882,1440,3104	0	
+100	99	0	com.whatsapp:id/edit_layout	0,2882,1440,3104	0	
+101	100	0	com.whatsapp:id/text_entry_layout	0,2882,1195,3104	0	
+102	101	0	com.whatsapp:id/voice_note_stub	32,2895,1179,3088	0	
+103	101	1	com.whatsapp:id/input_layout	32,2895,1179,3088	0	
+104	103	0	com.whatsapp:id/biz_prompts_container	32,2895,1179,2895	0	
+105	103	1	com.whatsapp:id/input_layout_content	32,2895,1179,3088	0	
+106	105	0	com.whatsapp:id/emoji_picker_btn	32,2895,224,3087	0	
+107	105	1	com.whatsapp:id/entry	224,2926,795,3055	0	
+108	105	2	com.whatsapp:id/input_attach_button	795,2895,987,3087	0	
+109	105	3	com.whatsapp:id/camera_btn	987,2895,1179,3087	0	
+110	100	1	com.whatsapp:id/buttons	1211,2891,1416,3096	0	
+111	110	0	com.whatsapp:id/conversation_entry_action_button	1211,2891,1403,3083	0	
+112	111	0	com.whatsapp:id/send_container	1211,2891,1403,3083	0	
+113	112	0	com.whatsapp:id/voice_note_btn	1211,2891,1403,3083	0	
+114	27	7	com.whatsapp:id/footer_size	0,2882,0,3104	0	
+115	27	8	com.whatsapp:id/mention_attach	32,2902,32,2902	0	

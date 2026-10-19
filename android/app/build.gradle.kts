@@ -8,18 +8,11 @@ plugins {
 }
 
 // Release signing: reads a properties file kept OUTSIDE the repo
-// (storeFile / storePassword / keyAlias / keyPassword), named by the
-// JEV_KEYSTORE_PROPS env var. Without it, release builds are unsigned.
-//
-// Upstream defaulted this to a Windows path ('H:/android/keys/...'). Gradle's
-// file() resolves a string through a URI, and on Linux a drive-letter prefix
-// fails to convert at configuration time — the build dies before it can decide
-// whether to sign, so an unsigned build was impossible off Windows. No default:
-// unset means unsigned, which is what the comment above always claimed.
+// (storeFile / storePassword / keyAlias / keyPassword). Override the path with
+// the JEV_KEYSTORE_PROPS env var. Without it, release builds are unsigned.
 val releaseProps = Properties().apply {
-    val path = System.getenv("JEV_KEYSTORE_PROPS")?.takeIf { it.isNotBlank() }
-    val f = path?.let { File(it) }
-    if (f != null && f.exists()) FileInputStream(f).use { load(it) }
+    val f = File(System.getenv("JEV_KEYSTORE_PROPS") ?: "H:/android/keys/jev-release.properties")
+    if (f.exists()) FileInputStream(f).use { load(it) }
 }
 
 android {

@@ -32,7 +32,7 @@ API 密钥会作为请求头（`Authorization`）随对应请求发给你自己�
 模型服务商拿到这些内容后如何处理，由它们各自的隐私政策决定，需要你自己去看：
 
 - OpenRouter：https://openrouter.ai/privacy
-- DeepSeek：[https://www.deepseek.com/privacy-policy](https://www.deepseek.com/privacy-policy)（或所选服务商官网的隐私政策页面）
+- DeepSeek：[https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html](https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html)（或所选服务商官网的隐私政策页面）
 - 阿里云百炼（通义千问兼容接口）：以阿里云官方隐私政策为准
 
 如果你自己填的是别的接口地址，那家服务商的政策同样适用，作者无法替它们承诺任何事。

@@ -6,9 +6,12 @@
 
 | 变体 | 上游仓库 | 当前对齐到 | 上游当时的 tag | 同步日期 |
 |---|---|---|---|---|
-| `windows/` | [jev-chat-windows](https://github.com/jev-chat/jev-chat-windows) | `946d3d1` | `v0.1.11` | 2026-09-26 |
-| `android/` | [jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis) | `71ee797` | `v1.4` + 23 | 2026-09-26 |
-| `macos/` | [jev-chat-jarvis-mac](https://github.com/jev-chat/jev-chat-jarvis-mac) | `2387d71` | `v0.6.0` + 19 | 2026-09-26 |
+| `windows/` | [jev-chat-windows](https://github.com/jev-chat/jev-chat-windows) | `c6d3a10` | `v0.1.12` | 2026-10-19 |
+| `android/` | [jev-chat-jarvis](https://github.com/jev-chat/jev-chat-jarvis) 的 `cn/` | `bd3fe42` | `v1.7` + 18 | 2026-10-19 |
+| `macos/` | [jev-chat-jarvis-mac](https://github.com/jev-chat/jev-chat-jarvis-mac) | `cbf6fe4` | `v0.6.2` + 16 | 2026-10-19 |
+
+上一次（2026-09-26）对齐到：`windows/` = `946d3d1`（`v0.1.11`）、`android/` = `71ee797`（`v1.4` + 23）、
+`macos/` = `2387d71`（`v0.6.0` + 19）。
 
 建仓时的 fork 点（表里第一行的上一行）：`windows/` = `016eac1`、`android/` = `7c07d9d`、
 `macos/` = `a28cb9e`，都在 2026-09-22。
@@ -26,6 +29,23 @@ git -C /tmp/up worktree add /tmp/m nojev
 git -C /tmp/m commit -am 'chat-nojev <变体>'
 git -C /tmp/m merge <上游 HEAD>
 ```
+
+**android 要多一步。** 2026-10-06 起 jev-chat-jarvis 把国内版挪进了 `cn/`，根目录另有一个海外版
+`global/`（Jev for WhatsApp，英文，跟这个变体无关，不搬）。直接 merge 会变成整棵树挪目录。做法是
+先造一个「上游」commit：树是上游 HEAD 的 `cn/` 子树挪到根、再加上根目录的 `LICENSE` 和 `NOTICE`，
+父提交是合并基。这样 `git diff <合并基> <这个 commit>` 就是上游对应用本身的真实改动：
+
+```bash
+GIT_INDEX_FILE=/tmp/cn.index git -C /tmp/up read-tree <上游 HEAD>:cn
+for f in LICENSE NOTICE; do
+  GIT_INDEX_FILE=/tmp/cn.index git -C /tmp/up update-index --add --cacheinfo 100644,$(git -C /tmp/up rev-parse <上游 HEAD>:$f),$f
+done
+T=$(GIT_INDEX_FILE=/tmp/cn.index git -C /tmp/up write-tree)
+C=$(git -C /tmp/up commit-tree $T -p <合并基> -m "upstream cn/ re-rooted")
+git -C /tmp/m merge $C
+```
+
+差分测试的 `--upstream` 给仓库根或 `cn/` 都行，脚本自己认。
 
 于是 `git diff <合并基> HEAD` 就是**我们的偏离**，`git diff <合并基> <上游 HEAD>` 就是
 **上游这段时间干的事**，每个冲突 hunk 都能对着这两份判断该要哪边。解完冲突再铺回
@@ -54,7 +74,8 @@ git -C /tmp/m merge <上游 HEAD>
   以后自己加模块级名字前，先在上游那棵树里 grep 一下。
 - **原版的兜底只见过候选。** 三处原版都有「JSON 解析不出来就逐行抠」的兜底。合并之后同一段回答
   里还有判断，`"replies": []` 会让兜底把 JSON 自己的行当候选抠出来。三套差分各有一个场景盯着
-  （`all_candidates_filtered_out` / `one_tone_writes_nothing_usable`），同步完它们必须是绿的。
+  （`all_candidates_filtered_out` / `one_tone_writes_nothing_usable`），同步完它们必须是绿的，或者是
+  写明了原因的刻意不同（2026-10-19 起 Android 那个就是：见下面最后一条）。
 - **上游吞异常，桩坏了看起来像差分。** macOS 的 `_rank_payload` 把任何异常都吞成「没分」，上游
   v0.6.0 开始从 `self` 上读 `_reply_worker` / `_active_context`，桩里没有，于是 16 个场景全部
   报「我们这边分数不对」。`tools/equivalence_check_macos.py` 现在先检查上游那侧真的排出了分，
@@ -67,3 +88,14 @@ git -C /tmp/m merge <上游 HEAD>
   默认指着它自己的站点。同步完 `grep -rnE 'chatjevs\.com|jev-jarvis\.com|github\.com/jev-chat'`
   一遍变体的源码目录，App 里能点到的都要指本仓库。
 
+## 2026-10-19 那次同步多出来的两条
+
+- **原版修好了我们记着的 bug，那条偏离就删。** Android 签名配置那条偏离的理由是「Gradle 的 `file()` 在
+  Linux 上转不了 Windows 盘符路径，离开 Windows 打不出包」。jev-chat-jarvis 在 `b2665c6` 自己改成了
+  `File()`，在 Linux 上只是找不到那个文件、照样出未签名包，于是这条偏离删了，取原版的。每次同步都要
+  对着 `MERGE.md` 里写着「修原版的 bug」的那几条，查一遍原版是不是自己修了。
+- **原版的新 bug 落在我们替换掉的那段里，不照抄，记成刻意不同。** jev-chat-jarvis v1.7 不再把候选补足
+  三条，排序题却还要求恰好三条，于是两条候选时排序抛异常、面板一条候选都没有；`[]` 被逐行兜底解析成
+  一条字面的「[]」。这两段都在我们换成一次调用的那条路上，我们这边没有这两个问题。Android 差分里
+  `two_candidates_only`、`choice_names_missing_candidate`、`all_candidates_filtered_out` 三个场景因此
+  记为刻意不同（只差在 `rankedReplies`，判断那几项两边一致）。原版修了，就把这几条刻意不同撤掉。

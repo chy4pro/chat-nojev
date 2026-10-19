@@ -1,0 +1,300 @@
+# WhatsApp 2.26.38.73 screen recorded by @smgonthebeat (#73) from a test chat between two test accounts.
+# i	parent	childIndex	id	left,top,right,bottom	scrollable	text
+0	-1	0		0,0,1440,3168	0	
+1	0	0		0,0,1440,3168	0	
+2	1	0		0,0,1440,3168	0	
+3	2	0	com.whatsapp:id/action_bar_root	0,0,1440,3168	0	
+4	3	0	android:id/content	0,0,1440,3168	0	
+5	4	0	com.whatsapp:id/root_view	0,0,1440,3168	0	
+6	5	0	com.whatsapp:id/window_size_calculator_view	0,0,1440,3168	0	
+7	5	1	com.whatsapp:id/main_container	0,0,1440,3168	0	
+8	7	0		0,160,1440,3104	0	
+9	8	0	com.whatsapp:id/call_notification_holder_vr	0,160,1440,160	0	
+10	8	1		0,160,1440,3104	0	
+11	10	0	com.whatsapp:id/conversation_list_view_host	0,160,1440,3104	0	
+12	11	0	com.whatsapp:id/call_notification_holder	0,160,1440,160	0	
+13	11	1	android:id/content	0,160,1440,2782	0	
+14	13	0	com.whatsapp:id/media_fragment_holder	0,160,1440,160	0	
+15	13	1	com.whatsapp:id/pager_holder	0,160,1440,2782	0	
+16	15	0	com.whatsapp:id/pager	0,160,1440,2782	1	
+17	16	0	android:id/content	0,160,1440,2782	0	
+18	17	0	com.whatsapp:id/conversations_coordinator_layout	0,160,1440,2782	0	
+19	18	0	com.whatsapp:id/conversation_container	0,160,1440,2782	0	
+20	19	0	android:id/list	0,160,1440,2782	1	
+21	20	0		0,384,1440,624	0	
+22	21	0	com.whatsapp:id/my_search_bar	0,400,1440,592	0	
+23	22	0	com.whatsapp:id/search_bar_inner_layout	48,400,1392,592	0	
+24	23	0	com.whatsapp:id/search_icon	64,416,224,576	0	
+25	23	1	com.whatsapp:id/search_text	224,453,1392,539	0	
+26	20	1		0,624,1440,656	0	
+27	26	0		0,624,1440,656	0	
+28	27	0		0,656,1440,656	0	
+29	20	2		0,656,1440,656	0	
+30	29	0		0,656,1440,656	0	
+31	30	0	com.whatsapp:id/conversations_swipe_to_reveal_container	0,656,1440,656	0	
+32	31	0	com.whatsapp:id/conversations_swipe_to_reveal_header_combo	0,656,1440,656	0	
+33	32	0		0,656,1440,656	0	
+34	33	0	com.whatsapp:id/conversations_swipe_to_reveal_filter_recycler_view	0,656,1440,624	0	
+35	20	3	com.whatsapp:id/contact_row_container	0,656,1440,960	0	
+36	35	0	com.whatsapp:id/row_addon_start	0,672,288,944	0	
+37	36	0	com.whatsapp:id/contact_selector	0,672,288,944	0	
+38	37	0	com.whatsapp:id/contact_photo	40,704,248,912	0	
+39	35	1	com.whatsapp:id/row_content	288,714,1376,902	0	
+40	39	0	com.whatsapp:id/conversations_row_header	288,714,1376,805	0	
+41	40	0		288,714,1236,805	0	
+42	41	0	com.whatsapp:id/conversations_row_contact_name	288,714,477,805	0	
+43	40	1	com.whatsapp:id/conversations_row_date	1252,727,1376,792	0	
+44	39	1	com.whatsapp:id/bottom_row	288,813,1376,902	0	
+45	44	0		288,813,1376,902	0	
+46	45	0		288,813,1376,902	0	
+47	46	0	com.whatsapp:id/single_msg_tv	288,813,862,902	0	
+48	20	4	com.whatsapp:id/contact_row_container	0,960,1440,1264	0	
+49	48	0	com.whatsapp:id/row_addon_start	0,976,288,1248	0	
+50	49	0	com.whatsapp:id/contact_selector	0,976,288,1248	0	
+51	50	0	com.whatsapp:id/parent_stack_photo	0,1016,288,1208	0	
+52	51	0		0,1016,288,1208	0	
+53	52	0	com.whatsapp:id/community_stack_pile_bottom_crescents	12,1016,248,1208	0	
+54	52	1	com.whatsapp:id/parent_group_profile_photo	72,1032,232,1192	0	
+55	52	2	com.whatsapp:id/subgroup_pile_over	72,1032,232,1192	0	
+56	48	1	com.whatsapp:id/row_content	288,1008,1376,1216	0	
+57	56	0	com.whatsapp:id/conversations_row_header	288,1008,1376,1104	0	
+58	57	0		288,1010,1240,1101	0	
+59	58	0	com.whatsapp:id/conversations_row_contact_name	288,1010,1240,1101	0	
+60	57	1	com.whatsapp:id/conversations_row_chevron	1256,1008,1376,1104	0	
+61	56	1	com.whatsapp:id/bottom_row	288,1112,1376,1216	0	
+62	61	0		288,1112,1376,1216	0	
+63	62	0	com.whatsapp:id/msg_from_tv	288,1119,1051,1208	0	
+64	62	1	com.whatsapp:id/conversation_row_single_subgroup_bullet	1051,1112,1179,1216	0	
+65	62	2		1179,1119,1376,1208	0	
+66	65	0	com.whatsapp:id/single_msg_tv	1179,1119,1367,1208	0	
+67	20	5	com.whatsapp:id/contact_row_container	0,1264,1440,1568	0	
+68	67	0	com.whatsapp:id/row_addon_start	0,1280,288,1552	0	
+69	68	0	com.whatsapp:id/contact_selector	0,1280,288,1552	0	
+70	69	0	com.whatsapp:id/parent_stack_photo	0,1320,288,1512	0	
+71	70	0		0,1320,288,1512	0	
+72	71	0	com.whatsapp:id/community_stack_pile_bottom_crescents	12,1320,248,1512	0	
+73	71	1	com.whatsapp:id/parent_group_profile_photo	72,1336,232,1496	0	
+74	71	2	com.whatsapp:id/subgroup_pile_over	72,1336,232,1496	0	
+75	67	1	com.whatsapp:id/row_content	288,1312,1376,1520	0	
+76	75	0	com.whatsapp:id/conversations_row_header	288,1312,1376,1408	0	
+77	76	0		288,1314,1240,1405	0	
+78	77	0	com.whatsapp:id/conversations_row_contact_name	288,1314,1240,1405	0	
+79	76	1	com.whatsapp:id/conversations_row_chevron	1256,1312,1376,1408	0	
+80	75	1	com.whatsapp:id/bottom_row	288,1416,1376,1520	0	
+81	80	0		288,1416,1376,1520	0	
+82	81	0	com.whatsapp:id/msg_from_tv	288,1423,957,1512	0	
+83	81	1	com.whatsapp:id/conversation_row_single_subgroup_bullet	957,1416,1085,1520	0	
+84	81	2		1085,1423,1376,1512	0	
+85	84	0	com.whatsapp:id/single_msg_tv	1085,1423,1333,1512	0	
+86	20	6	com.whatsapp:id/contact_row_container	0,1568,1440,1872	0	
+87	86	0	com.whatsapp:id/row_addon_start	0,1584,288,1856	0	
+88	87	0	com.whatsapp:id/contact_selector	0,1584,288,1856	0	
+89	88	0	com.whatsapp:id/parent_stack_photo	0,1624,288,1816	0	
+90	89	0		0,1624,288,1816	0	
+91	90	0	com.whatsapp:id/community_stack_pile_bottom_crescents	12,1624,248,1816	0	
+92	90	1	com.whatsapp:id/parent_group_profile_photo	72,1640,232,1800	0	
+93	90	2	com.whatsapp:id/subgroup_pile_over	72,1640,232,1800	0	
+94	86	1	com.whatsapp:id/row_content	288,1616,1376,1824	0	
+95	94	0	com.whatsapp:id/conversations_row_header	288,1616,1376,1712	0	
+96	95	0		288,1618,1240,1709	0	
+97	96	0	com.whatsapp:id/conversations_row_contact_name	288,1618,1240,1709	0	
+98	95	1	com.whatsapp:id/conversations_row_chevron	1256,1616,1376,1712	0	
+99	94	1	com.whatsapp:id/bottom_row	288,1720,1376,1824	0	
+100	99	0		288,1720,1376,1824	0	
+101	100	0	com.whatsapp:id/msg_from_tv	288,1727,412,1816	0	
+102	100	1	com.whatsapp:id/conversation_row_single_subgroup_bullet	412,1720,540,1824	0	
+103	100	2		540,1727,1376,1816	0	
+104	103	0	com.whatsapp:id/single_msg_tv	540,1727,928,1816	0	
+105	20	7	com.whatsapp:id/contact_row_container	0,1872,1440,2176	0	
+106	105	0	com.whatsapp:id/row_addon_start	0,1888,288,2160	0	
+107	106	0	com.whatsapp:id/contact_selector	0,1888,288,2160	0	
+108	107	0	com.whatsapp:id/contact_photo	40,1920,248,2128	0	
+109	105	1	com.whatsapp:id/row_content	288,1930,1376,2118	0	
+110	109	0	com.whatsapp:id/conversations_row_header	288,1930,1376,2021	0	
+111	110	0		288,1930,1152,2021	0	
+112	111	0	com.whatsapp:id/conversations_row_contact_name	288,1930,1152,2021	0	
+113	110	1	com.whatsapp:id/conversations_row_date	1168,1943,1376,2008	0	
+114	109	1	com.whatsapp:id/bottom_row	288,2029,1376,2118	0	
+115	114	0		288,2029,1376,2118	0	
+116	115	0		288,2029,1376,2118	0	
+117	116	0	com.whatsapp:id/single_msg_tv	288,2029,676,2118	0	
+118	20	8	com.whatsapp:id/contact_row_container	0,2176,1440,2480	0	
+119	118	0	com.whatsapp:id/row_addon_start	0,2192,288,2464	0	
+120	119	0	com.whatsapp:id/contact_selector	0,2192,288,2464	0	
+121	120	0	com.whatsapp:id/parent_stack_photo	0,2232,288,2424	0	
+122	121	0		0,2232,288,2424	0	
+123	122	0	com.whatsapp:id/community_stack_pile_bottom_crescents	12,2232,248,2424	0	
+124	122	1	com.whatsapp:id/parent_group_profile_photo	72,2248,232,2408	0	
+125	122	2	com.whatsapp:id/subgroup_pile_over	72,2248,232,2408	0	
+126	118	1	com.whatsapp:id/row_content	288,2224,1376,2432	0	
+127	126	0	com.whatsapp:id/conversations_row_header	288,2224,1376,2320	0	
+128	127	0		288,2226,1240,2317	0	
+129	128	0	com.whatsapp:id/conversations_row_contact_name	288,2226,1014,2317	0	
+130	127	1	com.whatsapp:id/conversations_row_chevron	1256,2224,1376,2320	0	
+131	126	1	com.whatsapp:id/bottom_row	288,2328,1376,2432	0	
+132	131	0		288,2328,1376,2432	0	
+133	132	0	com.whatsapp:id/msg_from_tv	288,2335,412,2424	0	
+134	132	1	com.whatsapp:id/conversation_row_single_subgroup_bullet	412,2328,540,2432	0	
+135	132	2		540,2335,1376,2424	0	
+136	135	0	com.whatsapp:id/single_msg_tv	540,2335,928,2424	0	
+137	20	9	com.whatsapp:id/contact_row_container	0,2480,1440,2782	0	
+138	137	0	com.whatsapp:id/row_addon_start	0,2496,288,2768	0	
+139	138	0	com.whatsapp:id/contact_selector	0,2496,288,2768	0	
+140	139	0	com.whatsapp:id/contact_photo	40,2528,248,2736	0	
+141	137	1	com.whatsapp:id/row_content	288,2538,1376,2726	0	
+142	141	0	com.whatsapp:id/conversations_row_header	288,2538,1376,2629	0	
+143	142	0		288,2538,1124,2629	0	
+144	143	0	com.whatsapp:id/conversations_row_contact_name	288,2538,880,2629	0	
+145	142	1	com.whatsapp:id/conversations_row_date	1140,2551,1376,2616	0	
+146	141	1	com.whatsapp:id/bottom_row	288,2637,1376,2726	0	
+147	146	0		288,2637,1376,2726	0	
+148	147	0		288,2637,1376,2726	0	
+149	148	0	com.whatsapp:id/single_msg_tv	288,2637,676,2726	0	
+150	16	1		1440,160,1440,2782	0	
+151	150	0	com.whatsapp:id/updates_list	1440,160,1440,2782	0	
+152	151	0		1440,385,1440,556	0	
+153	152	0	com.whatsapp:id/header_textview	1504,433,1440,540	0	
+154	151	1		1440,556,1440,860	0	
+155	154	0	com.whatsapp:id/container	1440,556,1440,860	0	
+156	155	0	com.whatsapp:id/contact_selector	1440,556,1440,860	0	
+157	156	0	com.whatsapp:id/contact_photo	1488,596,1440,820	0	
+158	156	1	com.whatsapp:id/wdsProfilePicture	1488,604,1440,812	0	
+159	156	2	com.whatsapp:id/badge_click_surface	1584,684,1440,860	0	
+160	156	3	com.whatsapp:id/contact_mark	1616,716,1440,812	0	
+161	155	1	com.whatsapp:id/contact_text_container	1760,618,1440,798	0	
+162	161	0	com.whatsapp:id/contact_name	1760,618,1440,709	0	
+163	161	1	com.whatsapp:id/date_time	1760,717,1440,798	0	
+164	151	2		1440,860,1440,1031	0	
+165	164	0	com.whatsapp:id/header_textview	1504,908,1440,1015	0	
+166	151	3		1440,1031,1440,1267	0	
+167	166	0	com.whatsapp:id/directory_description	1504,1031,1440,1187	0	
+168	151	4		1440,1267,1440,1451	0	
+169	168	0	com.whatsapp:id/header_textview	1504,1315,1440,1391	0	
+170	168	1	com.whatsapp:id/addon_button	2688,1275,1440,1435	0	
+171	151	5	com.whatsapp:id/explore_more	1472,1451,1440,1643	0	
+172	151	6	com.whatsapp:id/create_newsletter	1472,1643,1440,1835	0	
+173	16	2	com.whatsapp:id/community_fragment	2880,160,1440,2782	0	
+174	173	0	com.whatsapp:id/community_recycler_view	2880,160,1440,2782	1	
+175	174	0		2880,384,1440,688	0	
+176	175	0	com.whatsapp:id/community_selector	2880,384,1440,688	0	
+177	176	0	com.whatsapp:id/community_icon	2936,440,1440,632	0	
+178	176	1	com.whatsapp:id/community_mark	3048,544,1440,640	0	
+179	176	2	com.whatsapp:id/community_selection_check	3048,544,1440,640	0	
+180	175	1		3184,384,1440,688	0	
+181	180	0	com.whatsapp:id/community_subject	3184,490,1440,581	0	
+182	174	1		2880,720,1440,1024	0	
+183	182	0	com.whatsapp:id/community_selector	2880,720,1440,1024	0	
+184	183	0	com.whatsapp:id/community_icon	2936,776,1440,968	0	
+185	183	1	com.whatsapp:id/community_selection_check	3048,880,1440,976	0	
+186	182	1		3184,720,1440,1024	0	
+187	186	0	com.whatsapp:id/community_subject	3184,826,1440,917	0	
+188	174	2	com.whatsapp:id/contact_row_container	2880,1028,1440,1332	0	
+189	188	0	com.whatsapp:id/row_addon_start	2880,1028,1440,1332	0	
+190	189	0	com.whatsapp:id/contact_selector	2880,1028,1440,1332	0	
+191	190	0	com.whatsapp:id/contact_photo	2944,1092,1440,1268	0	
+192	188	1	com.whatsapp:id/row_content	3184,1086,1440,1274	0	
+193	192	0	com.whatsapp:id/conversations_row_header	3184,1086,1440,1177	0	
+194	193	0		3184,1086,1440,1177	0	
+195	194	0	com.whatsapp:id/conversations_row_contact_name	3184,1086,1440,1177	0	
+196	193	1	com.whatsapp:id/conversations_row_date	4020,1099,1440,1164	0	
+197	192	1	com.whatsapp:id/bottom_row	3184,1185,1440,1274	0	
+198	197	0		3184,1185,1440,1274	0	
+199	198	0		3184,1185,1440,1274	0	
+200	199	0	com.whatsapp:id/single_msg_tv	3184,1185,1440,1274	0	
+201	174	3	com.whatsapp:id/contact_row_container	2880,1332,1440,1668	0	
+202	201	0	com.whatsapp:id/row_addon_start	2880,1348,1440,1652	0	
+203	202	0	com.whatsapp:id/contact_selector	2880,1348,1440,1652	0	
+204	203	0	com.whatsapp:id/contact_photo	2944,1412,1440,1588	0	
+205	201	1	com.whatsapp:id/row_content	3184,1406,1440,1594	0	
+206	205	0	com.whatsapp:id/conversations_row_header	3184,1406,1440,1497	0	
+207	206	0		3184,1406,1440,1497	0	
+208	207	0	com.whatsapp:id/conversations_row_contact_name	3184,1406,1440,1497	0	
+209	206	1	com.whatsapp:id/conversations_row_date	4132,1419,1440,1484	0	
+210	205	1	com.whatsapp:id/bottom_row	3184,1505,1440,1594	0	
+211	210	0		3184,1505,1440,1594	0	
+212	211	0		3184,1505,1440,1594	0	
+213	212	0	com.whatsapp:id/single_msg_tv	3184,1505,1440,1594	0	
+214	174	4	com.whatsapp:id/contact_row_container	2880,1668,1440,1972	0	
+215	214	0	com.whatsapp:id/row_addon_start	2880,1668,1440,1972	0	
+216	215	0	com.whatsapp:id/contact_selector	2880,1668,1440,1972	0	
+217	216	0	com.whatsapp:id/contact_photo	2944,1732,1440,1908	0	
+218	214	1	com.whatsapp:id/row_content	3184,1726,1440,1914	0	
+219	218	0	com.whatsapp:id/conversations_row_header	3184,1726,1440,1817	0	
+220	219	0		3184,1726,1440,1817	0	
+221	220	0	com.whatsapp:id/conversations_row_contact_name	3184,1726,1440,1817	0	
+222	219	1	com.whatsapp:id/conversations_row_date	4020,1739,1440,1804	0	
+223	218	1	com.whatsapp:id/bottom_row	3184,1825,1440,1914	0	
+224	223	0		3184,1825,1440,1914	0	
+225	224	0		3184,1825,1440,1914	0	
+226	225	0	com.whatsapp:id/single_msg_tv	3184,1825,1440,1914	0	
+227	174	5		2880,1972,1440,2196	0	
+228	227	0	com.whatsapp:id/row	2880,1972,1440,2196	0	
+229	228	0	com.whatsapp:id/chevron	2952,2036,1440,2132	0	
+230	228	1	com.whatsapp:id/view_more	3184,1972,1440,2196	0	
+231	174	6		2880,2228,1440,2532	0	
+232	231	0	com.whatsapp:id/community_selector	2880,2228,1440,2532	0	
+233	232	0	com.whatsapp:id/community_icon	2936,2284,1440,2476	0	
+234	232	1	com.whatsapp:id/community_selection_check	3048,2388,1440,2484	0	
+235	231	1		3184,2228,1440,2532	0	
+236	235	0	com.whatsapp:id/community_subject	3184,2334,1440,2425	0	
+237	174	7	com.whatsapp:id/contact_row_container	2880,2536,1440,2782	0	
+238	237	0	com.whatsapp:id/row_addon_start	2880,2536,1440,2782	0	
+239	238	0	com.whatsapp:id/contact_selector	2880,2536,1440,2782	0	
+240	239	0	com.whatsapp:id/contact_photo	2944,2600,1440,2776	0	
+241	237	1	com.whatsapp:id/row_content	3184,2594,1440,2782	0	
+242	241	0	com.whatsapp:id/conversations_row_header	3184,2594,1440,2685	0	
+243	242	0		3184,2594,1440,2685	0	
+244	243	0	com.whatsapp:id/conversations_row_contact_name	3184,2594,1440,2685	0	
+245	242	1	com.whatsapp:id/conversations_row_date	4020,2607,1440,2672	0	
+246	241	1	com.whatsapp:id/bottom_row	3184,2693,1440,2782	0	
+247	246	0		3184,2693,1440,2782	0	
+248	247	0		3184,2693,1440,2782	0	
+249	248	0	com.whatsapp:id/single_msg_tv	3184,2693,1440,2782	0	
+250	16	3	android:id/content	4320,160,1440,2782	0	
+251	250	0	android:id/empty	4320,160,1440,2782	0	
+252	251	0	com.whatsapp:id/calls_progress_bar	4944,1375,1440,1567	0	
+253	13	2	com.whatsapp:id/header	0,160,1440,384	0	
+254	253	0	com.whatsapp:id/toolbar_container	0,160,1440,384	0	
+255	254	0	com.whatsapp:id/toolbar	0,160,1440,384	0	
+256	255	0		64,160,864,384	0	
+257	256	0		64,160,64,240	0	
+258	256	1	com.whatsapp:id/toolbar_logo	64,240,864,324	0	
+259	255	1		1088,160,1440,384	0	
+260	259	0	com.whatsapp:id/menuitem_camera	1088,176,1280,368	0	
+261	259	1	com.whatsapp:id/menuitem_overflow	1280,176,1440,368	0	
+262	253	1	com.whatsapp:id/toolbar_padding	0,384,1440,384	0	
+263	13	3	com.whatsapp:id/extended_mini_fab	1176,2254,1344,2414	0	
+264	263	0		1176,2254,1344,2414	0	
+265	264	0	com.whatsapp:id/extended_mini_fab_icon	1208,2278,1312,2390	0	
+266	13	4	com.whatsapp:id/fab	1152,2494,1376,2718	0	
+267	11	2	com.whatsapp:id/bottom_nav_container	0,2782,1440,3104	0	
+268	267	0	com.whatsapp:id/bottom_nav_divider	0,2782,1440,2784	0	
+269	267	1	com.whatsapp:id/nav_phoenix_rounded_background_container	0,2784,1440,3104	0	
+270	269	0	com.whatsapp:id/bottom_nav	0,2784,1440,3104	0	
+271	270	0		0,2784,1440,3104	0	
+272	271	0		0,2784,360,3104	0	
+273	272	0	com.whatsapp:id/navigation_bar_item_icon_container	52,2832,308,2960	0	
+274	273	0	com.whatsapp:id/navigation_bar_item_active_indicator_view	52,2832,308,2960	0	
+275	273	1	com.whatsapp:id/navigation_bar_item_icon_view	116,2832,244,2960	0	
+276	272	1	com.whatsapp:id/navigation_bar_item_labels_group	123,2980,236,3104	0	
+277	276	0	com.whatsapp:id/navigation_bar_item_large_label_view	123,2980,236,3056	0	
+278	271	1		360,2784,720,3104	0	
+279	278	0	com.whatsapp:id/navigation_bar_item_icon_container	412,2832,668,2960	0	
+280	279	0	com.whatsapp:id/navigation_bar_item_active_indicator_view	489,2832,591,2960	0	
+281	279	1	com.whatsapp:id/navigation_bar_item_icon_view	476,2832,604,2960	0	
+282	278	1	com.whatsapp:id/navigation_bar_item_labels_group	483,2980,596,3104	0	
+283	282	0	com.whatsapp:id/navigation_bar_item_small_label_view	483,2980,596,3056	0	
+284	271	2		720,2784,1080,3104	0	
+285	284	0	com.whatsapp:id/navigation_bar_item_icon_container	772,2832,1028,2960	0	
+286	285	0	com.whatsapp:id/navigation_bar_item_active_indicator_view	849,2832,951,2960	0	
+287	285	1	com.whatsapp:id/navigation_bar_item_icon_view	836,2832,964,2960	0	
+288	284	1	com.whatsapp:id/bottom_nav_indicator_badge	936,2836,984,2884	0	
+289	284	2	com.whatsapp:id/navigation_bar_item_labels_group	843,2980,956,3104	0	
+290	289	0	com.whatsapp:id/navigation_bar_item_small_label_view	843,2980,956,3056	0	
+291	271	3		1080,2784,1440,3104	0	
+292	291	0	com.whatsapp:id/navigation_bar_item_icon_container	1132,2832,1388,2960	0	
+293	292	0	com.whatsapp:id/navigation_bar_item_active_indicator_view	1209,2832,1311,2960	0	
+294	292	1	com.whatsapp:id/navigation_bar_item_icon_view	1196,2832,1324,2960	0	
+295	291	1	com.whatsapp:id/navigation_bar_item_labels_group	1203,2980,1316,3104	0	
+296	295	0	com.whatsapp:id/navigation_bar_item_small_label_view	1203,2980,1316,3056	0	
+297	5	2	com.whatsapp:id/navigation_bar_protection	0,3168,1440,3168	0	

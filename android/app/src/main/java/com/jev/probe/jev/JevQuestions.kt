@@ -247,8 +247,12 @@ object JevQuestions {
      * Criterion order for choice and noul questions is the order [judge] put
      * them in (Android's org.json keeps insertion order); score levels are a
      * JSONArray and are always in order, the index being the score itself.
+     *
+     * [replies] is how many candidates the same answer carries. The ranking
+     * block is keyed by that many reply keys, and left out for a single
+     * candidate, which upstream does not rank.
      */
-    fun renderJudgmentSpec(questions: JSONObject = judge()): String {
+    fun renderJudgmentSpec(questions: JSONObject = judge(), replies: Int = REPLY_KEYS.size): String {
         val blocks = ArrayList<String>()
         for (name in QUESTION_ORDER) {
             val q = questions.optJSONObject(name) ?: continue
@@ -257,8 +261,8 @@ object JevQuestions {
                 q.optString("instructions") + "\n" + criteriaLines(q) +
                 if (kind == "choice") "\n" + CHOICE_ANSWER else "")
         }
-        blocks.add("""### best_reply""" + "\n" + """Answer shape: the top-level "best_reply" and """ +
-            """"reply_scores" fields described above, keyed """ + REPLY_KEYS.joinToString(", ") +
+        if (replies > 1) blocks.add("""### best_reply""" + "\n" + """Answer shape: the top-level "best_reply" and """ +
+            """"reply_scores" fields described above, keyed """ + REPLY_KEYS.take(replies).joinToString(", ") +
             """ in the same order as "replies".""" + "\n" + RANK_INSTRUCTIONS)
         return blocks.joinToString("\n\n")
     }

@@ -50,12 +50,13 @@ class ConversationSessionTest {
         assertFalse(session.accepts(request))
     }
 
-    @Test fun differentMessagesInvalidateEvenWhenChatTitlesMatch() {
+    /** Identity is app + window + title (#71): new messages in the same chat keep an in-flight request valid. */
+    @Test fun newMessagesInTheSameChatKeepTheRequest() {
         val session = ConversationSession()
         session.observe(chatA.copy(messagesSignature = "other:hello"))
         val request = session.begin()!!
         session.observe(chatA.copy(messagesSignature = "other:goodbye"))
-        assertFalse(session.accepts(request))
+        assertTrue(session.accepts(request))
     }
 
     @Test fun leavingChatInvalidatesResultsAndDelayedWrites() {
