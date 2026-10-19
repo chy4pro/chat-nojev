@@ -8,6 +8,7 @@ import traceback
 
 import numpy as np
 
+from app import chatapps
 from app.capture import Capture, chat_area, unminimize
 from app.ocr import Reader, read_title, similar
 
@@ -30,11 +31,12 @@ def _packet(full, area, title, reader, lines):
             "ocr_ms": reader.last_ms if reader else 0, "ts": time.time()}
 
 
-def run(q, hwnd, enabled, debug_on):
+def run(q, hwnd, enabled, debug_on, app_key=None):
     """enabled 置位=采集，清掉=暂停。暂停时停掉 WGC 会话（Windows 那圈黄色采集边框也跟着没了），
     恢复时重开一个；readers 一直留着，去重状态不丢，恢复后不会把屏幕上的旧消息再报一遍。
     debug_on 置位才往队列里送整帧（一帧 2~3MB），关着一点额外活都不干。"""
     ctypes.windll.user32.SetProcessDPIAware()
+    app = chatapps.get(app_key)
     cap = None
     readers = {}  # {会话名: Reader}，一个会话一套去重状态
     title, head = "", None  # 当前会话名 / 上一帧的头部像素
@@ -79,7 +81,7 @@ def run(q, hwnd, enabled, debug_on):
                     crop = full[y_pane:y0, x0:x1]  # 头部：会话名在这里
                     if head is None or not np.array_equal(crop, head):  # 名字没动就别白跑一次 OCR
                         head = crop
-                        name = read_title(crop)
+                        name = read_title(crop, app)
                         # OCR 抖一下（「小分队」↔「小分认」）不能分裂出一个新会话
                         name = next((k for k in readers if similar(k, name)), name) if name else ""
                         # ponytail: 认不出就沿用上次；开头就认不出给个占位名，总比把消息全丢了强
@@ -87,7 +89,7 @@ def run(q, hwnd, enabled, debug_on):
                         if name != title:
                             title = name
                             q.put(("chat", title))
-                    reader = readers.setdefault(title, Reader())
+                    reader = readers.setdefault(title, Reader(app))
                     lines = reader.read(full[y0:y1, x0:x1], bg)
                     new = reader.new_lines(lines)
                     if new:

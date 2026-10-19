@@ -48,6 +48,10 @@ def style() -> str:
     """用户自己描述的说话风格（可选，自由文本），只喂给起草模型。默认空 = 只照着最近的消息模仿。"""
     return str(_read("style") or "")
 
+def language() -> str:
+    """配置中选择的界面语言；启动环境变量的覆盖由 i18n 处理。"""
+    return str(_read("lang") or "zh").strip().lower()
+
 def draft_provider() -> str:
     """起草走哪家（见 core/providers.DRAFT_PROVIDERS）。老配置里的 openrouter/deepseek 照样认。"""
     v = _read("draft_provider")
@@ -142,7 +146,8 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
          llm_key_text: str | None = None, draft_model_text: str | None = None,
          draft_base_url_text: str | None = None, reply_target_on: bool | None = None,
          style_text: str | None = None, thinking_on: bool | None = None,
-         check_update_on: bool | None = None, debug_view_on: bool | None = None) -> None:
+         check_update_on: bool | None = None, debug_view_on: bool | None = None,
+         lang_text: str | None = None) -> None:
     """每个参数为空/None = 保留当前值。key 写进程环境 + HKCU\\Environment，不写任何文件。"""
     draft = draft_provider_text if draft_provider_text in DRAFT_PROVIDERS else draft_provider()
     # 只写用户自己填的那把。惯用变量（DEEPSEEK_API_KEY 之类）留在原处按来源读就行，
@@ -169,5 +174,8 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
         "check_update": flag(check_update_on, check_update),
         "debug_view": flag(debug_view_on, debug_view),
     }
+    lang = _read("lang") if lang_text is None else lang_text.strip().lower()
+    if lang is not None:
+        data["lang"] = lang
     with open(_CONFIG, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)

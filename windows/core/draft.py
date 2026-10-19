@@ -81,7 +81,7 @@ _OUTPUT_CONTRACT = (
 # 判断说明：题目原文来自 core/questions.py，这里只是把它铺进提示词，一个字都没改写。
 SYSTEM = (
     _DRAFT_RULES + "\n" + _OUTPUT_CONTRACT
-    + "\n\n判断说明（judgment 那 7 个字段照这里答；说明是英文的，聊天内容仍然是中文）：\n\n"
+    + "\n\n判断说明（judgment 那 7 个字段照这里答；说明是英文的，聊天内容仍然是对话原本的语言）：\n\n"
     + render_judgment_spec()
 )
 

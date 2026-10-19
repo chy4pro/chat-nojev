@@ -3,15 +3,20 @@
 import ctypes
 import os
 import time
+from ctypes import wintypes
 
 import numpy as np
+
+from app import chatapps
 
 u32 = ctypes.windll.user32
 
 
-def find_wechat_hwnd():
-    """枚举可见顶层窗口，按进程名挑主窗口，没有就取第一个。
-    同进程还有工具窗和看图窗，面积可能更大，所以不能按面积挑。"""
+def find_chat_hwnd(want=None):
+    """枚举可见顶层窗口，按进程名认出聊天软件，返回 (hwnd, ChatApp)。
+    微信：同进程还有工具窗和看图窗，面积可能更大，所以按标题挑主窗口。
+    KakaoTalk：一个对话一个窗口，主列表窗（标题「카카오톡」）不是目标，挑剩下最大的那个。
+    want=某个 ChatApp 时只找它，None 时先到先得（两个都开着就按 APPS 顺序）。"""
     k32 = ctypes.windll.kernel32
     found = []
 
@@ -30,16 +35,36 @@ def find_wechat_hwnd():
             return True
         pid = ctypes.c_ulong()
         u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if exe_of(pid.value) in ("weixin.exe", "wechat.exe"):
+        app = chatapps.by_exe(exe_of(pid.value))
+        if app and (want is None or app is want):
             title = ctypes.create_unicode_buffer(256)
             u32.GetWindowTextW(hwnd, title, 256)
-            found.append((hwnd, title.value))
+            rect = wintypes.RECT()
+            u32.GetWindowRect(hwnd, ctypes.byref(rect))
+            area = (rect.right - rect.left) * (rect.bottom - rect.top)
+            found.append((hwnd, title.value, area, app))
         return True
 
     u32.EnumWindows(cb, 0)
     if not found:
         raise RuntimeError("没找到聊天窗口，开着吗？")
-    return next((h for h, t in found if t == "微信"), found[0][0])
+    for app in chatapps.APPS.values():
+        mine = [f for f in found if f[3] is app]
+        if not mine:
+            continue
+        if app.main_title:
+            hit = next((f for f in mine if f[1] == app.main_title), None)
+            if hit:
+                return hit[0], app
+        rooms = [f for f in mine if f[1] not in app.skip_titles] or mine
+        best = max(rooms, key=lambda f: f[2])
+        return best[0], app
+    raise RuntimeError("没找到聊天窗口，开着吗？")
+
+
+def find_wechat_hwnd():
+    """老名字：只返回 hwnd，给还没改过来的调用方用。"""
+    return find_chat_hwnd()[0]
 
 
 def unminimize(hwnd):

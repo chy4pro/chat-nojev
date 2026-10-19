@@ -7,6 +7,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import PlainTextEdit
+from app.i18n import T
 
 # (kind, 画框的色, 色的中文, 这类是什么)：跟设置页那条提示一个口径
 _KINDS = (("me", "#18794e", "绿", "我"), ("her", "#1f6fd0", "蓝", "对方"),
@@ -32,7 +33,8 @@ class _Canvas(QWidget):
         p.fillRect(self.rect(), QColor("#1b1f1d"))
         if self.img is None:
             p.setPen(QColor("#9aa6a0"))
-            p.drawText(self.rect(), Qt.AlignCenter, "等待画面…\n开着采集，聊天窗口有动静就会有帧")
+            p.drawText(self.rect(), Qt.AlignCenter,
+                       T("等待画面…") + "\n" + T("开着采集，聊天窗口有动静就会有帧"))
             return
         # 等比铺满 + 居中；s 是「缩小后的帧 → 控件」的倍率，k 是子进程缩了多少
         s = min(self.width() / self.img.width(), self.height() / self.img.height())
@@ -45,7 +47,7 @@ class _Canvas(QWidget):
         area = self.pkt.get("area")
         if not area:
             p.setPen(QColor("#d0342c"))
-            p.drawText(QRectF(ox, oy, w, 30), Qt.AlignCenter, "认不出消息区")
+            p.drawText(QRectF(ox, oy, w, 30), Qt.AlignCenter, T("认不出消息区"))
             return
         x0, y0, x1, y1 = area
         p.setPen(QPen(QColor(_HEAD), 1))
@@ -75,7 +77,6 @@ class DebugWindow(QWidget):
     def __init__(self, on_close=None):
         super().__init__()
         self.on_close = on_close
-        self.setWindowTitle("识别调试")
         self.setWindowFlags(Qt.Tool)
         self.resize(900, 650)
         outer = QVBoxLayout(self)
@@ -88,12 +89,12 @@ class DebugWindow(QWidget):
         self.info = PlainTextEdit(self)
         self.info.setReadOnly(True)
         self.info.setFixedWidth(300)
-        self.info.setPlainText(_legend())
         row.addWidget(self.info)
         outer.addLayout(row)
-        self.status = QLabel("最近一帧 —— · 等待中…", self)
+        self.status = QLabel(self)
         self.status.setStyleSheet("color: #68776f;")
         outer.addWidget(self.status)
+        self.retranslate()
 
     def show_packet(self, pkt):
         """子进程送来的一帧：RGB 裸字节 → QImage（copy 一份，原 bytes 之后就回收了）。"""
@@ -101,26 +102,47 @@ class DebugWindow(QWidget):
                                  QImage.Format_RGB888).copy()
         self.canvas.pkt = pkt
         self.canvas.update()
+        self._show_packet_text(pkt)
+
+    def retranslate(self):
+        """按缓存帧刷新文案，保留图像和滚动位置，不重新采集或识别。"""
+        self.setWindowTitle(T("识别调试"))
+        vertical = self.info.verticalScrollBar().value()
+        horizontal = self.info.horizontalScrollBar().value()
+        if self.canvas.pkt is None:
+            self.info.setPlainText(_legend())
+            self.status.setText(T("最近一帧 —— · 等待中…"))
+        else:
+            self._show_packet_text(self.canvas.pkt)
+        self.info.verticalScrollBar().setValue(vertical)
+        self.info.horizontalScrollBar().setValue(horizontal)
+        self.canvas.update()
+
+    def _show_packet_text(self, pkt):
         area = pkt.get("area")
         counts = {}
         for b in pkt.get("boxes", ()):
             counts[b[4]] = counts.get(b[4], 0) + 1
         text = [
-            f"会话：{pkt.get('title') or '（未识别）'}",
-            "消息区：" + (f"x {area[0]}–{area[2]} · y {area[1]}–{area[3]}" if area else "认不出消息区"),
-            f"头部顶：y {pkt.get('pane_top', 0)}",
-            f"OCR 耗时：{pkt.get('ocr_ms', 0)} ms",
-            f"帧：{pkt['w']}×{pkt['h']}（原帧缩了 1/{pkt.get('scale', 1)} 再过队列）",
-            "框：" + ("、".join(f"{_NAME.get(k, k)} {v}" for k, v in counts.items()) or "无"),
+            T("会话：{title}").format(title=pkt.get("title") or T("（未识别）")),
+            T("消息区：{area}").format(
+                area=f"x {area[0]}–{area[2]} · y {area[1]}–{area[3]}" if area else T("认不出消息区")),
+            T("头部顶：y {top}").format(top=pkt.get("pane_top", 0)),
+            T("OCR 耗时：{elapsed} ms").format(elapsed=pkt.get("ocr_ms", 0)),
+            T("帧：{width}×{height}（原帧缩了 1/{scale} 再过队列）").format(
+                width=pkt["w"], height=pkt["h"], scale=pkt.get("scale", 1)),
+            T("框：{counts}").format(
+                counts="、".join(f"{T(_NAME.get(k, k))} {v}" for k, v in counts.items()) or T("无")),
             "",
-            f"本帧 {len(pkt.get('lines', ()))} 行",
+            T("本帧 {count} 行").format(count=len(pkt.get("lines", ()))),
         ]
         for who, name, line in pkt.get("lines", ()):
             text.append(f"{who}({name})：{line}" if name else f"{who}：{line}")
         text += ["", _legend()]
         self.info.setPlainText("\n".join(text))
         stamp = datetime.fromtimestamp(pkt.get("ts") or 0).strftime("%H:%M:%S")
-        self.status.setText(f"最近一帧 {stamp} · 共 {len(pkt.get('boxes', ()))} 个框")
+        self.status.setText(T("最近一帧 {stamp} · 共 {count} 个框").format(
+            stamp=stamp, count=len(pkt.get("boxes", ()))))
 
     def closeEvent(self, event):
         if self.on_close:
@@ -129,5 +151,5 @@ class DebugWindow(QWidget):
 
 
 def _legend():
-    return ("图例（蓝粗框 = 消息区，紫细框 = 头部会话名）\n"
-            + "\n".join(f"  {word} = {what}（{k}）" for k, _, word, what in _KINDS))
+    return (T("图例（蓝粗框 = 消息区，紫细框 = 头部会话名）") + "\n"
+            + "\n".join(f"  {T(word)} = {T(what)}（{k}）" for k, _, word, what in _KINDS))

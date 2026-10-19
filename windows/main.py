@@ -14,11 +14,12 @@ import traceback
 from collections import deque
 
 from app import settings, update, worker
-from app.capture import find_wechat_hwnd
+from app.capture import find_chat_hwnd
 from app.fill import fill
 from app.overlay import Overlay
 from app.version import VERSION
 from core.engine import analyze
+from app.i18n import T
 
 # {会话名: {history, result, rev, target, senders}}：每个会话各自的上下文、上次结果和版本号，互不串味
 # history 里是 [(who, text, name)]，engine 只认 her/me，name 是群里的发言人（单聊/自己说的是 None）；
@@ -45,9 +46,9 @@ def target_of(title):
 
 def fill_reply(text):
     if state["hwnd"] is None:  # 子进程重开过，hwnd 可能换了，用最新的
-        raise RuntimeError("未找到聊天窗口，请确认已经打开")
+        raise RuntimeError(T("未找到聊天窗口，请确认已经打开"))
     if state["area"] is None:
-        raise RuntimeError("输入区域尚不可用，请确认聊天窗口可见（不要最小化）")
+        raise RuntimeError(T("输入区域尚不可用，请确认聊天窗口可见（不要最小化）"))
     if settings.reply_target() and ov.at_prefix_enabled():
         target = target_of(ov.current_chat())  # 填进去的是界面上正看着的那个会话的对象
         if target:
@@ -58,7 +59,8 @@ def fill_reply(text):
 def spawn_worker():
     """开一个采集子进程，它跟着 capture_on 走：置位=采集，清掉=暂停。"""
     p = multiprocessing.Process(target=worker.run,
-                                args=(q, state["hwnd"], capture_on, debug_on), daemon=True)
+                                args=(q, state["hwnd"], capture_on, debug_on, state.get("app")),
+                                daemon=True)
     p.start()
     return p
 
@@ -86,6 +88,12 @@ def on_debug_closed():
     settings.save(debug_view_on=False)
 
 
+def on_language_changed():
+    """主界面切换语言后，同步刷新已经打开过的调试窗。"""
+    if dbg is not None:
+        dbg.retranslate()
+
+
 def on_toggle_capture(on):
     """标题栏开关。启动时没找到微信就没有子进程，这会儿再找一次，找到了才真开得起来。"""
     global child
@@ -94,7 +102,8 @@ def on_toggle_capture(on):
         return
     if child is None:
         try:
-            state["hwnd"] = find_wechat_hwnd()
+            state["hwnd"], found = find_chat_hwnd()
+            state["app"] = found.key
         except RuntimeError:
             ov.set_capture(False, "未找到聊天窗口，打开后再开启采集")
             return
@@ -113,7 +122,7 @@ def analyze_bg(msgs, title, revision, reply_to=None):
                                    thinking=settings.thinking()),
                      title, revision))
     except Exception as e:
-        results.put(("err", f"分析失败: {e}", title, revision))
+        results.put(("err", f"{T('分析失败: ')}{e}", title, revision))
 
 
 def check_update_bg():
@@ -125,7 +134,8 @@ def check_update_bg():
 
 def start_analyze(title, msgs):
     if not settings.has_llm_key():
-        ov.set_status(f"来源 {settings.draft_provider_name()} 没填密钥，去设置里补上", "warning")
+        ov.set_status(lambda name=settings.draft_provider_name():
+                      f"{T('来源')} {name}{T(' 没填密钥，去设置里补上')}", "warning")
         return
     state["busy"] = True
     ov.set_busy(True)
@@ -256,14 +266,16 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
     q = multiprocessing.Queue()
     capture_on = multiprocessing.Event()  # 父子进程共用的开关，置位=采集
     debug_on = multiprocessing.Event()  # 同上，置位=子进程往队列里送整帧给调试窗
+    child = dbg = None
     ov = Overlay(on_fill=fill_reply, on_toggle_capture=on_toggle_capture,
                  on_target_change=on_target_change, on_toggle_debug=set_debug,
+                 on_language_changed=on_language_changed,
                  result_of=lambda t: chats.get(t, {}).get("result"))
-    child = dbg = None
     try:
-        state["hwnd"] = find_wechat_hwnd()
+        state["hwnd"], found = find_chat_hwnd()
+        state["app"] = found.key
     except RuntimeError:
-            ov.set_capture(False, "未找到聊天窗口，打开后再开启采集")
+        ov.set_capture(False, "未找到聊天窗口，打开后再开启采集")
     else:
         capture_on.set()
         child = spawn_worker()

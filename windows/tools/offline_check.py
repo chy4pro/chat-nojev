@@ -27,6 +27,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import i18n
 from core import draft
 from core.engine import analyze
 from core.errors import redact_secrets
@@ -69,31 +70,35 @@ def _assigned_expr(tree, name: str) -> str:
     raise SystemExit(f"没在 app/overlay.py 里找到 {name} 的赋值")
 
 
-def _settext_expr(tree, needle: str) -> str:
-    """某个 xxx.setText(...) 的实参源码（按文案里的关键词认，紧张度那行）。"""
+def _bound_text_expr(tree, needle: str) -> str:
+    """某个 bind(xxx, lambda: ...) 里那个 lambda 的表达式源码（按文案里的关键词认，紧张度那行）。
+    上游 v0.1.12 起界面文案都走 app/i18n.py 的 bind()，原来的 xxx.setText(...) 换成了这个形状。"""
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "setText" and node.args):
-            src = ast.unparse(node.args[0])
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "bind" and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Lambda)):
+            src = ast.unparse(node.args[1].body)
             if needle in src:
                 return src
-    raise SystemExit(f"没在 app/overlay.py 里找到带「{needle}」的 setText")
+    raise SystemExit(f"没在 app/overlay.py 里找到带「{needle}」的 bind")
 
 
 # 界面那三样：_choice() 整个函数照搬着跑，紧张度的判据和文案照搬它的表达式。
 # 这里不 import overlay（要 PySide6），但跑的确实是它源码里的那几行。
+# 文案过 app/i18n.py 的 T()（不要 PySide6）；钉在中文，下面断言的是中文界面。
 _OVERLAY = _overlay()
-_NS: dict = {}
+i18n.reload("zh")
+_NS: dict = {"T": i18n.T}
 exec(_func_source(_OVERLAY, "_choice"), _NS)
 render_choice = _NS["_choice"]
 _VALID_SCORE = _assigned_expr(_OVERLAY, "valid_score")
-_TENSION_TEXT = _settext_expr(_OVERLAY, "紧张度")
+_TENSION_TEXT = _bound_text_expr(_OVERLAY, "紧张度")
 
 
 def render_tension(score):
     """overlay 拿到这个 score 会把紧张度那行写成什么（坏值走它自己的退路，不炸）。"""
     valid = eval(_VALID_SCORE, {"isfinite": isfinite, "score": score})
-    return eval(_TENSION_TEXT, {"score": score, "valid_score": valid})
+    return eval(_TENSION_TEXT, {"score": score, "valid_score": valid, "T": i18n.T})
 
 
 def check_shape(result: dict, expect_cands: int) -> None:
