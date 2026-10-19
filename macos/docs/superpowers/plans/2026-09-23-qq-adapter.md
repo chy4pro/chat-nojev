@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让 macOS 版 jev-jarvis 在微信之外同时支持 QQ（QQNT 6.9.x）：微信继续走截图 + OCR，QQ 走系统无障碍（AX）树；HUD 按前台 App 分发。
+**Goal:** 让 macOS 版 jev-jarvis 在截图识别路径之外同时支持文本接口路径（QQNT 6.9.x）：截图识别路径继续走截图 + OCR，QQ 走系统无障碍（AX）树；HUD 按前台 App 分发。
 
 **Architecture:** 新增 `src/apps/` 适配器层：`base.py` 定义 `ChatApp` 协议，`wechat.py` 薄封装现有 `perception` / `fill`，`qq.py` 用 AX 树读 QQ 聊天窗口（DOM class `container--self` 判方向、`ExEditor-qq-msg-editor` 定位输入框），`registry.py` 按前台 App 的 bundle id / 名字分发。`hud.py` 用 `self._app` 取代 `self._wechat_frontmost`，读屏与填入全部经 `self._app`。设计文档：`docs/superpowers/specs/2026-09-23-qq-adapter-design.md`。
 
@@ -184,13 +184,13 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 2: 适配器协议与微信薄封装
+### Task 2: 适配器协议与截图识别路径薄封装
 
 **Files:**
 - Create: `src/apps/__init__.py`、`src/apps/base.py`、`src/apps/wechat.py`
-- Test: `tests/test_registry.py`（先放微信封装的委托测试，Task 3 再补分发测试）
+- Test: `tests/test_registry.py`（先放截图型封装的委托测试，Task 3 再补分发测试）
 
-- [ ] **Step 1: 写失败测试（微信封装逐一委托）**
+- [ ] **Step 1: 写失败测试（截图型封装逐一委托）**
 
 ```python
 # tests/test_registry.py
@@ -247,7 +247,7 @@ if __name__ == '__main__':
 Run: `uv run python -B -m unittest tests.test_registry -v`
 Expected: FAIL / ERROR，`ModuleNotFoundError: No module named 'apps'`
 
-- [ ] **Step 3: 写协议与微信封装**
+- [ ] **Step 3: 写协议与截图型封装**
 
 `src/apps/__init__.py`：
 
@@ -1648,12 +1648,12 @@ Expected: grep 无输出。
 Run: `uv run python -B -m unittest discover -s tests`
 Expected: 末行 `OK`。若某个 HUD 测试仍红，按错误信息对照上面各步（最常见：sed 漏替换某行，或 `_asked_accessibility` 未在 setUp 里初始化）。
 
-- [ ] **Step 8: 真机验证（QQ 与微信各一轮）**
+- [ ] **Step 8: 真机验证（QQ 与两条路径各一轮）**
 
 Run: `./start.command`（终端需已授予辅助功能 + 屏幕录制）
 
 1. QQ 聊天窗口置前台，让对方发一条消息 → 面板出现意图 / 风险 / 候选 → 点「填入」→ 文字进入 QQ 输入框，未发送。日志 `tail -40 ~/Library/Logs/jev-jarvis.log` 里应有「前台切换 · QQ回到前台」。
-2. 切到微信 → 日志「前台切换 · 微信回到前台」，同一轮流程照常。
+2. 切到截图识别路径 → 日志「前台切换 · 截图型应用回到前台」，同一轮流程照常。
 3. 切到 Chrome → 面板隐藏，日志「聊天应用离开前台」。
 
 Expected: 三步均如上；否则先看日志分阶段耗时定位到读屏 / 判断 / 生成哪一层。
@@ -1676,7 +1676,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 - [ ] **Step 1: README**
 
-1. 第 1 行标题下的引导句「微信弹出一条消息 → …」改为「微信或 QQ 弹出一条消息 → 悬浮窗立刻告诉你**这句话的真实意图**、**风险几级**、**该怎么回**。」
+1. 第 1 行标题下的引导句「截图识别路径弹出一条消息 → …」改为「任一路径的聊天应用 弹出一条消息 → 悬浮窗立刻告诉你**这句话的真实意图**、**风险几级**、**该怎么回**。」
 2. 「它能做什么」之前新增一节：
 
 ```markdown
@@ -1699,11 +1699,11 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - QQ 改版若变更界面 class 名（`container--self` / `ExEditor-qq-msg-editor`），`src/apps/qq.py` 顶部常量需同步；`uv run python probe/qq_ax_probe.py` 可直接看当前真实取值
 ```
 
-5. 「开发者」的分层自测代码块里追加一行 `uv run python src/apps/qq.py                    # QQ 感知层：AX 读到的消息（CLI 里可验）`；「架构一句话」改为「微信在前台时，进程内抓其窗口 → Vision OCR（只扫聊天区）；QQ 在前台时，读其无障碍树 → 同一条管线：本地 decider-2b 出意图/风险 → LLM 并发出候选 → 本地排序 → 悬浮窗 NSPanel。」
+5. 「开发者」的分层自测代码块里追加一行 `uv run python src/apps/qq.py                    # QQ 感知层：AX 读到的消息（CLI 里可验）`；「架构一句话」改为「截图型应用在前台时，进程内抓其窗口 → Vision OCR（只扫聊天区）；QQ 在前台时，读其无障碍树 → 同一条管线：本地 decider-2b 出意图/风险 → LLM 并发出候选 → 本地排序 → 悬浮窗 NSPanel。」
 
 - [ ] **Step 2: AGENTS.md**
 
-首段「微信悬浮窗助手（macOS）：OCR 读微信窗口 → …」改为「微信 / QQ 悬浮窗助手（macOS）：微信走 OCR 读窗口、QQ 走系统无障碍树 → 本地模型判意图/风险 → LLM 生成候选回复 → 悬浮窗展示/一键填入。」
+首段「聊天悬浮窗助手（macOS）：OCR 读截图识别路径窗口 → …」改为「两条路径的聊天应用 悬浮窗助手（macOS）：截图识别路径走 OCR 读窗口、QQ 走系统无障碍树 → 本地模型判意图/风险 → LLM 生成候选回复 → 悬浮窗展示/一键填入。」
 
 「目录与命令」第一条在 `src/perception.py 抓图+OCR+抽消息；` 之后插入：`src/apps/ 聊天 App 适配器层（base.py 协议、wechat.py 转调 perception/fill、qq.py 无障碍树读 QQNT、registry.py 按前台 App 分发）；`。分层自测代码块追加 `uv run python src/apps/qq.py  # QQ 感知层（AX 路径，CLI 里可验）`。
 

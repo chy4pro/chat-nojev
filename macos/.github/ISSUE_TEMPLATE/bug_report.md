@@ -25,4 +25,5 @@ tail -40 ~/Library/Logs/jev-jarvis.log
 
 - macOS 版本：
 - 启动方式：start.command / .app 双击
+- 判断层：本地 decider-2b / TypeSafe Jev（不确定就写「默认」）
 - 生成层端点：如 DeepSeek / 智谱 / Ollama（不确定就写「默认」）

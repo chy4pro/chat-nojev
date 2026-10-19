@@ -54,7 +54,7 @@ class SelectionView(A.NSView):
                          m.w*self.bounds().size.width,m.h*self.bounds().size.height)
             (ui_style.PALETTE["amber"] if m.side=='unknown' else ui_style.PALETTE["green"]).set()
             A.NSBezierPath.bezierPathWithRect_(r).stroke()
-            label={'them':'对方','me':'我','unknown':'未确认'}[m.side]
+            label=m.label
             A.NSString.stringWithString_(label).drawAtPoint_withAttributes_(
                 (r.origin.x,max(0,r.origin.y-14)),
                 {A.NSFontAttributeName:A.NSFont.boldSystemFontOfSize_(11),

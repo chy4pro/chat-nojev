@@ -74,6 +74,16 @@ class Message:
     x: float = 0.0
     w: float = 0.0
     last_y: float = 0.0     # top of the most recent folded line; fold bookkeeping only
+    quote: str = ""
+    quote_sender: str = ""
+    content_state: str = ""  # empty: separated; mixed: body/quote boundary unresolved
+
+    @property
+    def label(self) -> str:
+        who = self.sender or {"them": "对方", "me": "我"}.get(self.side, "归属未确认")
+        detail = (" · 正文与引用待区分" if self.content_state == "mixed" else
+                  " · 引用背景" if self.quote else "")
+        return who + detail
 
 
 @dataclass
@@ -350,6 +360,7 @@ def _vision_blocks(handler, languages, chat_only: bool, input_top=None, region=N
             ))
 
     req = Vision.VNRecognizeTextRequest.alloc().initWithCompletionHandler_(completion)
+    # Accurate 级别慢但准；Fast 在聊天场景漏字严重，不可用(实测验证)。
     req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
     req.setRecognitionLanguages_(list(languages))
     req.setUsesLanguageCorrection_(True)
@@ -536,8 +547,19 @@ def message_side(x: float, width: float) -> str:
     return "unknown"
 
 
-def extract_messages(blocks: list[TextBlock], max_messages: int = 12, input_top=None) -> list[Message]:
-    """Turn raw OCR blocks into an ordered list of chat messages (bottom = newest)."""
+def extract_messages(blocks: list[TextBlock], max_messages: int = 12, input_top=None,
+                     image=None, chat_left=CHAT_PANE_X_MIN) -> list[Message]:
+    """Extract using bubble surfaces when pixels are available (all live reads).
+
+    The text-only path is retained for legacy OCR probes; it cannot establish
+    message ownership and is never used for live WeChat analysis.
+    """
+    if image is not None:
+        from calibrated_messages import extract
+        top = 1 - TITLE_BAR_Y_MAX
+        bottom = input_top if input_top is not None else 1 - INPUT_AREA_Y_MIN
+        return extract(image, blocks, (chat_left, top,
+                       1 - chat_left, bottom - top), max_messages)
     chat = [b for b in blocks
             if b.x >= CHAT_PANE_X_MIN
             and (INPUT_AREA_Y_MIN if input_top is None else 1.0 - input_top) < b.y < TITLE_BAR_Y_MAX
@@ -665,14 +687,19 @@ def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0)
         top = max(b.y+b.h for b in candidates)
         line = [b for b in candidates if top-(b.y+b.h) < b.h*.6]
         title = " ".join(b.text for b in sorted(line,key=lambda b:b.x))
+    t_ocr = time.perf_counter()
     blocks = recover_numeric_bubbles(image, blocks, (x,y,w,h))
+    t_recover = time.perf_counter()
     msgs = extract(image, blocks, (x,y,w,h), max_messages)
-    elapsed = (time.perf_counter()-t0)*1000
+    t_end = time.perf_counter()
+    elapsed = (t_end-t0)*1000
     return {"ok": True, "unchanged": False, "window": window, "messages": msgs,
             "chat_title": title, "n_blocks": len(blocks), "fingerprint": None,
             "layout": (window['wid'],window['w'],window['h'],calibration.serialize()),
             "input_rect": None, "manual_calibration": True,
-            "timing_ms": {"capture":capture_ms, "ocr":elapsed,
+            "timing_ms": {"capture":capture_ms, "ocr":(t_ocr-t0)*1000,
+                          "recover":(t_recover-t_ocr)*1000,
+                          "classify":(t_end-t_recover)*1000,
                           "total":capture_ms+elapsed, "capture_path":"manual"}}
 
 
@@ -753,10 +780,15 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
     t_ocr = time.perf_counter()
 
     chat_title = extract_chat_title(blocks)
-    msgs = (extract_messages(blocks, max_messages=max_messages, input_top=input_top)
+    t_extract = time.perf_counter()
+    msgs = (extract_messages(blocks, max_messages=max_messages, input_top=input_top, image=image,
+                             chat_left=outline[0])
             if outline else [])
+    t_classify = time.perf_counter()
+    classify_ms = (t_classify - t_extract) * 1000
     timing = {"capture": (t_cap - t0) * 1000, "ocr": (t_ocr - t_cap) * 1000,
-              "total": (t_ocr - t0) * 1000, "capture_path": capture_path}
+              "classify": classify_ms,
+              "total": (t_classify - t0) * 1000, "capture_path": capture_path}
     return {
         "ok": True,
         "unchanged": False,

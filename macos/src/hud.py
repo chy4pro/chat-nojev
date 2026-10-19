@@ -96,9 +96,9 @@ SLOW_TICK = 1.0          # re-check cadence while the chat pane keeps moving
 READ_FAILURE_HIDE_S = 2.0  # do not flicker on a transient capture/window miss
 EMPTY_FRAME_REUSE_S = READ_FAILURE_HIDE_S  # #58: how long an empty-OCR streak may
                                            # reuse the last read before giving up
-SETTLE_S = 1.2           # upper bound on the settle wait (anti-flood; unchanged by design)
-EARLY_SETTLE_S = 0.70    # the gate may open this early …
-STABLE_READS = 3         # … but only after this many consecutive unchanged reads
+SETTLE_S = 0.8           # upper bound on the settle wait (anti-flood; unchanged by design)
+EARLY_SETTLE_S = 0.50    # the gate may open this early …
+STABLE_READS = 2         # … but only after this many consecutive unchanged reads
 MIN_GAP_S = 2.0          # never restart analysis faster than this
 IDLE_STATUS = "等待聊天应用消息…"   # the resting status line (also set at build time)
 # 上游这里还有 WARM_STATUS「判断模型加载中…」：本地 decider-2b 首次加载/下载要数分钟。
@@ -1256,6 +1256,10 @@ class HudController(NSObject):
             self._render("status", "填入失败：输入目标属于另一应用，请等检测框更新后重试", PALETTE["red"])
             return
         ok, reason = app.fill_text(text, target=target)
+        if reason in (fill.REASON_COPIED, fill.REASON_COPY_FAILED):
+            diag = fill.fallback_diagnosis()
+            if diag:
+                _log(f"填入兜底 · {diag}")    # #139 排查数据：无正文，只有诊断
         if ok:
             self._render("status", reason, PALETTE["green"])
         else:
@@ -1806,11 +1810,13 @@ class HudController(NSObject):
         self._win_wid = res["window"]["wid"]
         self._push("applyPosition:", res["window"])
         fresh_frame = not res["unchanged"]
+        previous_frame = self._last_full
         if res["unchanged"] and self._last_full is not None:
             # the settle/analyze gate below still runs every read; an unchanged frame
             # just skips re-deriving the messages it would act on
             res = self._last_full
-        elif (not res.get("manual_calibration") and not res["messages"] and self._last_full is not None
+        elif (not res.get("manual_calibration") and not res.get("n_blocks")
+              and not res["messages"] and self._last_full is not None
               and self._last_full.get("messages")):
             # Transient empty frame (#58): the window is still enumerated and the capture
             # succeeded, but OCR returned 0 blocks (4.x redraw glitch). Reuse the
@@ -1861,11 +1867,24 @@ class HudController(NSObject):
                 from visual_fill import chat_signature
                 rect = editor.screen_rect(res['window'])
                 signature_rect = self._calibration.screen_rect(res['window'])
-                self._input_target = dict(box=None,rect=None,window=dict(res['window']),
+                # 校准模式同样优先 AX 定位：定位到就走 AX 写入（快、不覆盖剪贴板），
+                # 定位不到才回退校准框 + 复制兜底。节流期内沿用上次结果，避免 box 抖动；
+                # AX 不可用是稳态，失败后 3s 才重试，成功后 1s 刷新（与下方 AX 路径同频）。
+                now_calib = time.monotonic()
+                if now_calib >= getattr(self, "_calib_ax_next", 0):
+                    ax = app.locate_input(res["window"])
+                    if ax is not None and ax.get("box") is not None:
+                        self._calib_ax_target = (ax["box"], ax["rect"])
+                        self._calib_ax_next = now_calib + 1.0
+                    else:
+                        self._calib_ax_target = None
+                        self._calib_ax_next = now_calib + 3.0
+                ax_box, ax_rect = getattr(self, "_calib_ax_target", None) or (None, None)
+                self._input_target = dict(box=ax_box,rect=ax_rect,window=dict(res['window']),
                     visual_rect=rect,manual_region=editor,signature_rect=signature_rect,
                     chat_signature=chat_signature(res['window'],signature_rect),
                     app=app.key,   # 填入前复核：手动校准目标同样必须带归属标记（#105）
-                    reason="手动校准输入区")
+                    reason="手动校准输入区" if ax_box is None else "手动校准输入区 · AX 可写")
             self._input_window = dict(res["window"])
             self._input_next = float("inf")
             if not res.get("chat_title"):
@@ -1905,19 +1924,34 @@ class HudController(NSObject):
                 self._last_full = None
                 return
             msgs = res["messages"]
-            # 手动校准模式下，无法确认归属的文字不进入会话历史与模型上下文。
+            # 微信两种模式均在存历史之前排除归属未确认内容。
             # 必须在 visible/observe 之前过滤——事后过滤会让 _observed_offset 的
             # 索引错位；检测框仍画原始列表（含「未确认」框），见下方 applyBoxes。
             overlay_msgs = None
-            if res.get("manual_calibration"):
+            if app.key == "wechat":
                 overlay_msgs = msgs
                 msgs = [m for m in msgs if m.side != "unknown"]
-            visible = [(m.text, m.side, m.sender or "") for m in msgs]
+            # 检测框先画：它只要几何，而下面的 observe（会话历史读写）与
+            # _context_text（8192 预算裁剪）在切换会话时最慢，压在前面会让框
+            # 迟迟不出（实测「切换对话后要等很久框才出」即此因）。纯视觉层，
+            # 提前推送不影响任何管线逻辑。
+            if self._show_boxes:
+                thems_overlay = [m for m in msgs if m.side == "them"]
+                self._push("applyBoxes:", (res["window"], overlay_msgs or msgs,
+                                           thems_overlay[-1].text if thems_overlay else None))
+            visible = [chat_context.message_record(m) for m in msgs]
             self._observed_messages, self._observed_offset = visible, 0
             if self.history_enabled and self.conversations and not self.conversations.error:
                 try:
+                    previous = None
+                    if (app.key == "wechat" and previous_frame
+                            and previous_frame.get("chat_title") == res.get("chat_title")
+                            and previous_frame.get("window") == res.get("window")
+                            and previous_frame.get("layout") == res.get("layout")):
+                        previous = chat_context.recognition_revision(
+                            [m for m in previous_frame["messages"] if m.side != "unknown"], msgs)
                     self._observed_messages, self._observed_offset = self.conversations.observe(
-                        res.get("chat_title"), visible, record=fresh_frame)
+                        res.get("chat_title"), visible, record=fresh_frame, previous=previous)
                 except (OSError, ValueError):
                     _log("保存会话历史失败，使用当前画面继续分析")
                     self._push("applyError:", "会话历史保存失败，请检查磁盘空间及权限")
@@ -1938,11 +1972,8 @@ class HudController(NSObject):
                 self._pregen_req = self._pregen_result = None
                 self._gen_epoch += 1
 
-            # YOLO overlay: repaint whenever a read produced geometry — unchanged reads reuse
-            # the cached messages, so the boxes stay up even while the pane is quiet
-            if self._show_boxes:
-                self._push("applyBoxes:", (res["window"], overlay_msgs or msgs,
-                                           newest.text if newest else None))
+            # 检测框已在 observe/上下文之前推送过（见上方注释）：一轮读屏只画一次，
+            # 未变化帧沿用缓存的 messages，安静时框也留在屏上。
             if newest is None:
                 self._push("applyWaiting:", "暂未确认输入区边界，暂停分析"
                            if res.get("input_unresolved") else None)
@@ -1962,6 +1993,8 @@ class HudController(NSObject):
                 # one-off from being read as a regression (same reason the judge line does it)
                 note = "（首次，含 Vision 加载）" if first_read and t.get("ocr", 0) > 400 else ""
                 _log(f"读屏 抓取 {t.get('capture', 0):.0f}ms + OCR {t.get('ocr', 0):.0f}ms"
+                     f"{' + 数字补识别 ' + str(round(t['recover'])) + 'ms' if t.get('recover') else ''}"
+                     f"{' + 分类 ' + str(round(t['classify'])) + 'ms' if t.get('classify') else ''}"
                      f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）"
                      f"{note}")
                 _log(f"新消息 · 这次调用先跑，停稳 {SETTLE_S}s（连续 {STABLE_READS} 跳不变最早 "
@@ -2194,7 +2227,7 @@ class HudController(NSObject):
             title = (self._last_full or {}).get("chat_title")
             return chat_context.context_text(
                 self._observed_messages if self._observed_messages is not None else
-                [(m.text, m.side, m.sender or "") for m in msgs],
+                [chat_context.message_record(m) for m in msgs],
                 self._observed_offset + next(i for i, m in enumerate(msgs) if m is newest),
                 limit=self.context_limit,
                 background=store.data.get(title, {}).get('background', '') if store else "")
@@ -2470,8 +2503,7 @@ class HudController(NSObject):
         for m in msgs:
             if m.w <= 0:
                 continue               # pre-overlay geometry: nothing to draw
-            who = m.sender or {"them": "对方", "me": "我"}.get(m.side, "方向未确认")
-            label = f"{who} {m.conf:.2f}"
+            label = f"{m.label} · OCR {m.conf:.2f}"
             if judged and m.side == "them" and m.text == newest_text:
                 # 风险读不出来（模型没给 / 给的不是数）就只挂意图，颜色退回普通那一档——
                 # 不按 0 处理，那等于替模型说「安全」
@@ -2480,7 +2512,8 @@ class HudController(NSObject):
                 lw = 2.5
                 label += f" · {self._last_intent}" + ("" if risk is None else f" 风险{risk}/9")
             else:
-                color = _rgb(0x576B95) if m.side == "me" else PALETTE["green"]
+                color = (_rgb(0x576B95) if m.side == "me" else
+                         PALETTE["amber"] if m.side == "unknown" else PALETTE["green"])
                 lw = 1.5
             chip = NSAttributedString.alloc().initWithString_attributes_(
                 label,
@@ -2594,9 +2627,31 @@ def warn_if_no_generation_key() -> None:
         pass          # no osascript: the panel still shows the hint in the candidate area
 
 
-def main() -> None:
+def build_edit_main_menu() -> AppKit.NSMenu:
+    """Accessory 应用的一份隐藏主菜单，只含「编辑」四项，承担 ⌘C/⌘V/⌘X/⌘A 路由。
+
+    macOS 的快捷键不直接派发给焦点控件：系统拿着快捷键在主菜单里找挂对应动作的
+    菜单项（⌘V → paste:），再沿响应链送达焦点文本框。Accessory 应用主菜单为空，
+    设置窗口的密钥框/地址框便全部无法粘贴（#145）。菜单项刻意不设 target——设了
+    就固定发给 self，不再沿响应链找焦点控件（与状态栏菜单相反：那边的 action 是
+    自己的方法，必须设）。主菜单栏在 Accessory 模式下不显示，界面零变化。
+    """
+    main_menu = AppKit.NSMenu.alloc().init()
+    edit_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "编辑", None, "")
+    edit_menu = AppKit.NSMenu.alloc().initWithTitle_("编辑")
+    for title, action, key in (("剪切", "cut:", "x"), ("复制", "copy:", "c"),
+                               ("粘贴", "paste:", "v"), ("全选", "selectAll:", "a")):
+        edit_menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
+    edit_item.setSubmenu_(edit_menu)
+    main_menu.addItem_(edit_item)
+    return main_menu
+
+
+def main() -> None:  # pragma: no cover — GUI 启动粘合，只有真启动才执行；菜单结构已由 build_edit_main_menu 的测试覆盖
     app = AppKit.NSApplication.sharedApplication()
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    app.setMainMenu_(build_edit_main_menu())
     warn_if_no_generation_key()
     controller = HudController.alloc().init()
     # First line of every run: which backends are actually in play. Support requests

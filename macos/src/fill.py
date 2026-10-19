@@ -1,8 +1,15 @@
 """One-click 「填入」: put a candidate reply into the chat app's input box.
 
-The AX path below remains preferred. When the chat app exposes no input control, an
-explicit Fill click can use visual_fill's checked keyboard fallback. It does not
-use the clipboard or Return; uncertain readback is reported, never retried.
+The AX path below remains the only write path. When the chat app exposes no input
+control, Fill falls back to copying the candidate to the pasteboard and telling the
+user to paste it themselves — NOT to visual_fill's synthesized click/keystrokes:
+#139 (2026-09-28) — WeChat's risk control force-logged-out accounts after synthetic
+CGEvent fills (4-5 reports in one window). Synthesized events carry their source
+metadata and can be told apart from hardware input, so the visual path is retired
+for WeChat. The user's own Cmd+V is a real keypress and leaves no such trace.
+
+This is deliberately NOT the old pasteboard+synthesized-Cmd+V that this file dropped
+long ago (see below): the tool only writes the clipboard; the keystroke is the user's.
 
 Preferred mechanism — the Accessibility API:
     find WeChat's input box in the accessibility tree (the AXTextArea inside the window
@@ -67,6 +74,17 @@ REASON_WRITE_FAILED = "写入输入框失败"
 REASON_NOT_VERIFIED = "写入后没读到内容，可能没填进去"
 REASON_BUSY = "上一次填入还没结束"
 REASON_DUPLICATE = "刚填入过同样的内容，已忽略这次重复点击"
+REASON_COPIED = "已复制到剪贴板，请在微信输入框按 ⌘V 粘贴"
+REASON_COPY_FAILED = "复制到剪贴板失败，请手动选择候选文本复制"
+
+# Why the clipboard fallback fired, from the most recent Fill click. Diagnosis only —
+# never message text (this lands in a log users paste into issues, #139 follow-up).
+_LAST_FALLBACK: str | None = None
+
+
+def fallback_diagnosis() -> str | None:
+    """The recorded reason the last Fill had to fall back, or None if it didn't."""
+    return _LAST_FALLBACK
 
 
 def has_accessibility() -> bool:
@@ -235,6 +253,22 @@ def _ax_set_value(box, text: str) -> bool:
         return False
 
 
+def _copy_to_clipboard(text: str) -> bool:
+    """Put the candidate on the general pasteboard for the user to ⌘V themselves.
+
+    The tool writes the clipboard only; no keystroke is ever synthesized — the paste
+    is the user's real keypress (#139: synthesized input reads as automation to
+    WeChat's risk control). Overwriting the clipboard is inherent to this fallback,
+    but it happens only on an explicit Fill click, i.e. with the user's consent.
+    """
+    try:
+        pb = AppKit.NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        return bool(pb.setString_forType_(text, AppKit.NSPasteboardTypeString))
+    except Exception:
+        return False
+
+
 _FILL_LOCK = threading.Lock()
 _LAST_FILL: tuple[str, str, float] | None = None   # (text, box content after fill, ts)
 # Short on purpose: it only has to swallow a double click. The content check below is what
@@ -287,11 +321,30 @@ def fill_text(text: str, target=None) -> tuple[bool, str]:
             return False, REASON_NO_WECHAT
 
         if target is not None and target['box'] is None and target.get('visual_rect'):
-            from visual_fill import write_text
-            try:
-                return write_text(text, target, app)
-            except Exception:
-                return False, '输入过程异常，请先检查草稿，勿重复点击'
+            # No AX input control to write to. Copying for a manual ⌘V is the whole
+            # fallback: the user's own keypress is a real event, while synthesized
+            # click+keystrokes (visual_fill) read as automation to WeChat's risk
+            # control — force-logout, #139.
+            global _LAST_FALLBACK
+            # Re-probe once for the log: distinguishes the three candidate causes —
+            # a control findable NOW means perception-time staleness (timing/tree
+            # recovery); a window-read error means the known whole-tree collapse
+            # (kAXErrorCannotComplete -25211, 2026-09-26 note); otherwise the AX
+            # structure genuinely exposes no input control (cf. WeChat 4.1.15).
+            recheck = _find_input_box(app.processIdentifier())
+            if recheck is not None:
+                _LAST_FALLBACK = "兜底触发 · 此刻重查 AX 输入框可用——感知阶段定位已过期（时序或塌树后恢复）"
+            else:
+                try:
+                    err, _ = ApplicationServices.AXUIElementCopyAttributeValue(
+                        app, ApplicationServices.kAXWindowsAttribute, None)
+                except Exception:
+                    err = -1
+                why = "塌树特征" if err == -25211 else f"AX 窗口读取 err={err}"
+                _LAST_FALLBACK = f"兜底触发 · 重查仍无输入控件（{why}）"
+            if _copy_to_clipboard(text):
+                return True, REASON_COPIED
+            return False, REASON_COPY_FAILED
         if target is not None:
             fresh = locate_input(target["window"])
             box = fresh["box"]

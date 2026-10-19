@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 from perception import TextBlock
 import chat_context
+import fill
 import styles
 
 
@@ -50,7 +51,12 @@ def hud_harness():
                                fill_text=Mock(return_value=(True, '已填入')), warm=Mock(return_value=0.0))
     scope = {'chat_context': chat_context, 'styles': styles, 'isfinite': isfinite,
              'fill': SimpleNamespace(locate_input=locate, has_accessibility=Mock(return_value=True),
-                                     request_accessibility=Mock()),
+                                     request_accessibility=Mock(),
+                                     # real constants, not copies: the fallback log keys off
+                                     # these, and the fake must track the module's contract
+                                     REASON_COPIED=fill.REASON_COPIED,
+                                     REASON_COPY_FAILED=fill.REASON_COPY_FAILED,
+                                     fallback_diagnosis=Mock(return_value=None)),
              'time': time, 'threading': threading, '_log': lambda *_: None,
              'AppKit': SimpleNamespace(NSFloatingWindowLevel=3, NSNormalWindowLevel=0,
                                        NSOnState=1, NSOffState=0),

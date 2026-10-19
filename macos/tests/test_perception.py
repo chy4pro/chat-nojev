@@ -77,7 +77,10 @@ class PerceptionTests(unittest.TestCase):
             res = perception.read_calibrated(object(), cal, win, capture_ms=123.0)
         t = res['timing_ms']
         self.assertEqual(t['capture'], 123.0)
-        self.assertAlmostEqual(t['total'], 123.0 + t['ocr'], places=6)
+        # ocr / recover / classify 是同一段墙钟的三个分项（读屏日志分开打，便于
+        # 定位是 Vision、数字补识别还是像素分类在花时间）；total 仍须含上游 capture。
+        self.assertAlmostEqual(t['total'], 123.0 + t['ocr'] + t['recover'] + t['classify'],
+                               places=6)
         self.assertEqual(t['capture_path'], 'manual')
 
     def test_read_conversation_passes_capture_cost_to_calibrated(self):

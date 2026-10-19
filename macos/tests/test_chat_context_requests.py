@@ -14,6 +14,37 @@ import questions
 import styles
 
 
+def exercise_model_paths(h, msgs):
+    """Real adapters to the local HTTP server, only resident waits are replaced."""
+    tone = styles.DEFAULT_SLOTS[0]
+    h.slot_tones = [tone]
+    h.generator = generate.Generator()
+    # 上游这里还要装一个判断层客户端（JevJudge）并让服务端同时返回 answers：判断、
+    # 排序各是一次请求，也要一起核对上下文。判断合进了生成那一次调用，所以只有
+    # 这一种请求，answers 那一坨没有对应物了。
+    network.Server.code = 200
+    network.Server.response = {'choices': [{'message': {'content': '1. 合成候选甲\n2. 合成候选乙'}}]}
+    network.Server.requests = []
+    context = h._pregen_req[1]
+    # Resident loops execute real adapters, with only their wait boundary replaced.
+    class StopLoop(BaseException):
+        pass
+    signal = Mock()
+    signal.wait.side_effect = [None, StopLoop()]
+    h._pregen_event = signal
+    h._pregen_req = (msgs[-1].text, context, (tone,), h._reply_epoch)
+    try:
+        h._pregen_loop()
+    except StopLoop:
+        pass
+    h._pregen_result = None
+    h._reply_task(h._reply_epoch, h._analyze, msgs[-1], msgs, '')
+    h._reply_task(h._reply_epoch, h._regen_work, msgs[-1].text, [tone])
+    h._reply_task(h._reply_epoch, h._regenerate_work, msgs[-1].text, [tone])
+    requests = list(network.Server.requests)
+    return requests
+
+
 class ContextRequests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -36,30 +67,8 @@ class ContextRequests(unittest.TestCase):
             h.save_background('chat', '合成背景：小王负责验收')
             msgs = fixture.read([fixtures.block('合成先前消息', .40, .80, .15),
                                  fixtures.block('合成当前消息', .40, .60, .15)])
-            tone = styles.DEFAULT_SLOTS[0]
-            h.slot_tones = [tone]
-            h.generator = generate.Generator()
-            # 上游这里还要装一个判断层客户端（JevJudge）并让服务端同时返回 answers：判断、
-            # 排序各是一次请求，也要一起核对上下文。判断合进了生成那一次调用，所以只有
-            # 这一种请求，answers 那一坨没有对应物了。
-            network.Server.code = 200
-            network.Server.response = {'choices': [{'message': {'content': '1. 合成候选甲\n2. 合成候选乙'}}]}
-            network.Server.requests = []
             context = h._pregen_req[1]
-            # Resident loops execute real adapters, with only their wait boundary replaced.
-            class StopLoop(BaseException):
-                pass
-            signal = Mock()
-            signal.wait.side_effect = [None, StopLoop()]
-            h._pregen_event = signal
-            h._pregen_req = (msgs[-1].text, context, (tone,), h._reply_epoch)
-            with self.assertRaises(StopLoop):
-                h._pregen_loop()
-            h._pregen_result = None
-            h._reply_task(h._reply_epoch, h._analyze, msgs[-1], msgs, '')
-            h._reply_task(h._reply_epoch, h._regen_work, msgs[-1].text, [tone])
-            h._reply_task(h._reply_epoch, h._regenerate_work, msgs[-1].text, [tone])
-            requests = list(network.Server.requests)
+            requests = exercise_model_paths(h, msgs)
             # 上游这里是 11 次（预判 1 + 早跑 1 + 分析 3 + 预判命中那半路 2 + 换话术 2 +
             # 重新生成 2）。合成一次之后每条路只剩一次：早跑 1 + 分析 1 + 换话术 1 + 重新生成 1。
             self.assertGreaterEqual(len(requests), 4)
@@ -76,8 +85,8 @@ class ContextRequests(unittest.TestCase):
             network.Server.response = {'error': '合成隐私标记：消息、背景、候选'}
             logs = []
             with patch.dict(fixtures.HUD, {'_log': logs.append}):
-                h._reply_task(h._reply_epoch, h._regen_work, msgs[-1].text, [tone])
-                h._reply_task(h._reply_epoch, h._regenerate_work, msgs[-1].text, [tone])
+                h._reply_task(h._reply_epoch, h._regen_work, msgs[-1].text, h.slot_tones)
+                h._reply_task(h._reply_epoch, h._regenerate_work, msgs[-1].text, h.slot_tones)
             self.assertNotIn('合成隐私标记', str(logs) + str(fixture.queue))
 
     # 上游这里还有 test_local_fallback_forwards_same_context_to_judgment_and_rank：

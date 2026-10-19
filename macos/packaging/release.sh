@@ -174,6 +174,10 @@ if [ "$PUBLISH" = 1 ]; then
         exit 1
     fi
     echo "    ✓ 稳定链接可下载（releases/latest/download/jev-jarvis-macos-latest.zip）"
+
+    # 上游这里接着同步它自己的 Homebrew tap：克隆 git@github.com:jev-chat/homebrew-tap.git，
+    # 把 Casks/jev-jarvis.rb 的 version/sha256 改成这一版再 push。那个 cask 装的是上游原版；
+    # chat-nojev 没有 tap，不往任何 tap 发，整段删了（README「不是原版的地方」）。
 else
     echo
     echo "    下一步（发 GitHub Release）："

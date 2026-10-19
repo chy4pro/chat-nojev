@@ -4,12 +4,45 @@ from __future__ import annotations
 CONTEXT_CHARS = 8192
 
 
+def message_record(message):
+    """Keep old three-field records unchanged; metadata belongs to its message."""
+    base = (message.text, message.side, message.sender or "")
+    extra = (message.quote, message.quote_sender, message.content_state)
+    return base + extra if any(extra) else base
+
+
+def quote_context(record):
+    if len(record) == 3:
+        return ""
+    quote, author, state = record[3:]
+    if state == "mixed":
+        return "\n正文与引用待区分：以下为可读原文，不推断拆分或作者。"
+    return f"\n引用背景（{author or '作者未知'}，不是新发言）：{quote}" if quote else ""
+
+
+def recognition_revision(previous, current):
+    """Only refine an already observed frame, never infer corrections to old history."""
+    if len(previous) != len(current):
+        return None
+    for old, new in zip(previous, current):
+        if (old.x, old.y, old.w, old.h, old.side) != (new.x, new.y, new.w, new.h, new.side):
+            return None
+        if old.text == new.text:
+            continue
+        def reading(m):
+            return m.text + ("\n" + (m.quote_sender + "：" if m.quote_sender else "") + m.quote
+                             if m.quote else "")
+        if 'mixed' not in (old.content_state, new.content_state) or reading(old) != reading(new):
+            return None
+    return [message_record(m) for m in previous]
+
+
 def model_message(text: str, context: str | None = None) -> str:
     return text[:max(0, CONTEXT_CHARS - len(context or ""))]
 
 
 def context_text(messages, target: int, limit: int = 20, background: str = "") -> str | None:
-    """Messages are (text, side, sender); target is an instance, not a text match.
+    """Messages have three legacy fields plus optional quote/author/split state.
 
     ponytail: character budget (not provider tokens); revisit for smaller model windows.
     History loses whole oldest messages first; persisted originals are never shortened.
@@ -17,8 +50,15 @@ def context_text(messages, target: int, limit: int = 20, background: str = "") -
     current = messages[target]
     prior = [m for i, m in enumerate(messages) if i != target][-(limit - 1):] if limit > 1 else []
     header = (f"会话背景：\n{background}\n\n" if background else "")
-    header += f"当前待回复发言人：{current[2] or '对方'}"
-    lines = [f"{m[2] or {'me': '我', 'them': '对方'}.get(m[1], '方向未确认')}: {m[0]}"
+    speaker = f"当前待回复发言人：{current[2] or '对方'}"
+    mixed = len(current) == 6 and current[5] == 'mixed'
+    if len(current) == 6:
+        # Classification is necessary to interpret the raw text and cannot be
+        # displaced by a long user-supplied conversation background.
+        header = speaker + (quote_context(current) if mixed else '') + ('\n' + header if header else '')
+    else:
+        header += speaker
+    lines = [f"{m[2] or {'me': '我', 'them': '对方'}.get(m[1], '方向未确认')}: {m[0]}{quote_context(m)}"
              for m in prior]
     # If the two priority fields alone overflow, reserve up to half for the message;
     # a shorter field leaves its unused space to the other.
@@ -28,6 +68,9 @@ def context_text(messages, target: int, limit: int = 20, background: str = "") -
     else:
         message_size = len(current[0])
     budget = CONTEXT_CHARS - message_size
+    # Body gets its existing reservation before an attached quote can use space.
+    if not mixed:
+        header += quote_context(current)[:max(0, budget-len(header))]
     while lines and len(header) + 1 + sum(len(line) + 1 for line in lines) > budget:
         lines.pop(0)
     return header + ("\n" + "\n".join(lines) if lines else "")
@@ -74,8 +117,9 @@ class Conversations:
                 or not isinstance(chat.get('breaks', []), list)
                 or any(type(i) is not int or not 0 < i < len(chat.get('messages', []))
                        for i in chat.get('breaks', []))
-                or any(not isinstance(m, list) or len(m) != 3
+                or any(not isinstance(m, list) or len(m) not in (3, 6)
                        or not all(isinstance(v, str) for v in m)
+                       or (len(m) == 6 and m[5] not in ('', 'mixed'))
                        for m in chat.get('messages', []))
                 for title, chat in data.items()
             ):
@@ -130,7 +174,7 @@ class Conversations:
         self.reload()
         return [tuple(m) for m in self.data.get(title, {}).get('messages', [])][-100:] if title else []
 
-    def observe(self, title, visible, record=True):
+    def observe(self, title, visible, record=True, previous=None):
         """Return a reliable observed sequence and this frame's starting index.
 
         ponytail: exact sequence overlap only; OCR corrections or disjoint frames may
@@ -140,6 +184,16 @@ class Conversations:
             return visible, 0
         old = self.history(title)
         breaks = sorted(set(self.data.get(title, {}).get('breaks', [])))
+        if record and previous and previous != visible and len(previous) == len(visible):
+            matches = [i for i in range(len(old)-len(previous)+1)
+                       if old[i:i+len(previous)] == previous
+                       and not any(i < boundary < i+len(previous) for boundary in breaks)]
+            if len(matches) == 1:
+                start = matches[0]
+                updated = old[:start] + visible + old[start+len(previous):]
+                chat = dict(self.data.get(title, {}), messages=updated)
+                self._save(dict(self.data, **{title: chat}))
+                old = updated
         matches = [i for i in range(len(old) - len(visible) + 1)
                    if old[i:i + len(visible)] == visible
                    and not any(i < boundary < i + len(visible) for boundary in breaks)]

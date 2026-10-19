@@ -159,6 +159,30 @@ class SettingsNetwork(unittest.TestCase):
             self.assertNotIn('SECRET', msg)
         self.assertEqual(len(Server.requests), 4)
 
+    def test_network_errors_are_classified_by_layer(self):
+        # #116: DNS/拒绝/超时/TLS 此前全折叠成一句「连接失败或超时」，用户无从定位。
+        # 每层给出可区分的文案；超时文案必须点出「直连不走系统代理」这一最常见根因。
+        import socket
+        import ssl
+        import urllib.error
+        cases = [
+            (urllib.error.URLError(socket.gaierror(8, 'nodename nor servname')), '域名解析失败'),
+            (urllib.error.URLError(ConnectionRefusedError()), '连接被拒绝'),
+            (urllib.error.URLError(TimeoutError()), '连接超时'),
+            (TimeoutError(), '连接超时'),
+            (urllib.error.URLError(ssl.SSLCertVerificationError(1, 'cert')), 'TLS 证书验证失败'),
+            (ConnectionResetError(), '连接失败'),
+        ]
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__):
+                msg = config.error_message(error)
+                self.assertIn(expected, msg)
+        # 超时文案必须包含代理提示（最常见根因：网络需代理而应用直连）
+        self.assertIn('系统代理', config.error_message(urllib.error.URLError(TimeoutError())))
+        # 任何网络文案都不得回显 URL 或密钥
+        for error, _ in cases:
+            self.assertNotIn('https://', config.error_message(error))
+
 
 if __name__ == '__main__':
     unittest.main()

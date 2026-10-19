@@ -15,7 +15,7 @@
 - [ ] 开工前已认领：issue 下评论认领 + 设了 assignee（见 CONTRIBUTING.md 认领三步自检）
 - [ ] 离线回归跑过：`uv run --locked python -B -m unittest discover -s tests`
 - [ ] 覆盖率自查过（本地命令见 CONTRIBUTING「自测要求」，或直接看本 PR 的 CI 结果）
-- [ ] 守住核心原则：**纯只读**——不注入、不 hook、不解密微信数据（「填入」走辅助功能接口，未改回剪贴板 + Cmd+V，原因见 `src/fill.py` 顶部注释）
+- [ ] 守住核心原则：**纯只读**——不注入、不 hook、不解密聊天数据（「填入」走辅助功能接口，未改回剪贴板 + Cmd+V，原因见 `src/fill.py` 顶部注释）
 - [ ] 未引入硬编码的 API Key / 密码（密钥只能放仓库外的 `~/.config/jev-jarvis/env`）
-- [ ] 改了判断题面（`src/questions.py`）或合并那一次调用的解析（`src/generate.py`）→ 已重跑 `uv run python tools/offline_check.py`（未改可删）
+- [ ] 改了判断层 prompt → 已重跑 `uv run python src/judge_zh_test.py`（未改可删）
 - [ ] 改了用户可见行为 → 已更新 README.md

@@ -6,19 +6,19 @@
 
 ## 1. 目标与范围
 
-在保持微信路径零改动的前提下，让 macOS 版同时支持 **微信** 与 **QQ（QQNT 6.9.x，Electron 内核）**。HUD 按前台 App 分发到对应适配器；微信继续走「窗口截图 + Vision OCR」，QQ 走「系统无障碍（AX）树直接读结构化节点」。
+在保持截图识别路径路径零改动的前提下，让 macOS 版同时支持 **截图识别路径** 与 **QQ（QQNT 6.9.x，Electron 内核）**。HUD 按前台 App 分发到对应适配器；截图识别路径继续走「窗口截图 + Vision OCR」，QQ 走「系统无障碍（AX）树直接读结构化节点」。
 
 **做：**
 
-- 新增 `src/apps/` 适配器层，微信逻辑原样封装，QQ 新写 AX 实现。
-- `hud.py` 从「只认微信」改为「按前台 App 分发」，App 切换视为一次前台边界。
+- 新增 `src/apps/` 适配器层，截图识别路径逻辑原样封装，QQ 新写 AX 实现。
+- `hud.py` 从「只认截图识别路径」改为「按前台 App 分发」，App 切换视为一次前台边界。
 - QQ 的读消息、找输入框、一键填入，全部经 AX 完成；填入后备路径只用键盘事件。
 - 离线单测覆盖 QQ 解析与分发；README / AGENTS.md / `pyproject.toml` 同步。
 
 **不做（YAGNI）：**
 
 - QQ 紧凑模式（效率模式）迷你聊天窗；只支持独立聊天窗口。
-- 图片、表情包、文件等非文字消息的内容识别（微信 OCR 同样读不出，行为一致）。
+- 图片、表情包、文件等非文字消息的内容识别（截图识别路径 OCR 同样读不出，行为一致）。
 - 多个 QQ 聊天窗口同时分析；只分析焦点窗口。
 - 飞书、钉钉等其他 App。
 - 向上游提 PR（做完后可选）。
@@ -65,7 +65,7 @@ class ChatApp(Protocol):
 
 `WindowInfo`、`Message`、`TextBlock` 继续定义在 `perception.py`，`apps/` 只引用不搬动。
 
-### 3.2 微信适配器 `src/apps/wechat.py`
+### 3.2 截图型适配器 `src/apps/wechat.py`
 
 薄封装：`find_window` → `perception.find_wechat_window`，`read_conversation` → `perception.read_conversation`，`locate_input` / `fill_text` → `fill.*`，`warm` → `perception.warm_ocr`。`perception.py`、`fill.py`、`visual_fill.py`、`input_region.py` 不改识别逻辑。
 
@@ -102,11 +102,11 @@ def app_by_key(key: str) -> ChatApp | None: ...
 ### 3.5 HUD 接线 `src/hud.py`
 
 - `frontmost_app_is_wechat()` 的三处调用改为 `registry.frontmost_app()`；新增 `self._app`（当前适配器，可为 None）。
-- `_set_foreground_state(frontmost)` 的输入从 bool 改为「适配器或 None」：适配器对象变化（含 微信→QQ、QQ→微信、任一→None）即视为一次前台边界，沿用现有的隐藏面板、清空旧结果、`_foreground_epoch` 递增、强制重读。
+- `_set_foreground_state(frontmost)` 的输入从 bool 改为「适配器或 None」：适配器对象变化（含 截图识别路径→QQ、QQ→截图识别路径、任一→None）即视为一次前台边界，沿用现有的隐藏面板、清空旧结果、`_foreground_epoch` 递增、强制重读。
 - `read_conversation`、`fill.locate_input`、`fill.fill_text`、`warm_ocr` 调用改走 `self._app`。
 - 屏幕录制权限检查只在 `self._app.needs_screen_capture` 为真时执行；QQ 路径改为检查 `fill.has_accessibility()`，缺失时提示「需要辅助功能权限 · 系统设置 › 隐私与安全性」并只请求一次。
 - 回复缓存 key 从 `(chat_title, text)` 改为 `(app.key, chat_title, text)`。
-- 面板文案中的「微信」改为 `app.display_name`：`IDLE_STATUS` 改为「等待微信 / QQ 消息…」，前台离开提示「微信 / QQ 不在前台」，其余按当前 App 动态拼接。菜单栏 tooltip 改为「jev-jarvis · 微信 / QQ 意图助手」。
+- 面板文案中的「截图识别路径」改为 `app.display_name`：`IDLE_STATUS` 改为「等待两条路径的聊天应用 消息…」，前台离开提示「两条路径的聊天应用 不在前台」，其余按当前 App 动态拼接。菜单栏 tooltip 改为「jev-jarvis · 两条路径的聊天应用 意图助手」。
 - 轮询节奏、停稳窗口、最小分析间隔、预判/预生成、独立分析线程等**一律不动**（AGENTS.md 硬约束）。
 
 ## 4. 错误处理
@@ -117,7 +117,7 @@ def app_by_key(key: str) -> ChatApp | None: ...
 | 未授予辅助功能权限（QQ） | 面板报「需要辅助功能权限 · 系统设置 › 隐私与安全性」，`fill.request_accessibility()` 只调一次 |
 | 已设 `AXManualAccessibility` 但树为空 | `error="QQ 无障碍树为空，请重启 QQ 后重试"`；每 tick 重设标志，不自动重启进程 |
 | 多个 QQ 聊天窗口 | 取焦点窗口；焦点变化改变 layout 键，自动重读 |
-| 填入失败 | 沿用 `fill.py` 原因文案，「微信」替换为 App 名；不自动重试 |
+| 填入失败 | 沿用 `fill.py` 原因文案，「截图识别路径」替换为 App 名；不自动重试 |
 | `NSWorkspace` 瞬时失败 | `frontmost_app()` 返回 `UNKNOWN` 哨兵时按现有「冻结一个短 tick」处理，不制造离开/返回事件；返回 None 表示前台是别的 App（真正的离开） |
 
 ## 5. 测试
@@ -126,14 +126,14 @@ def app_by_key(key: str) -> ChatApp | None: ...
 
 - `tests/test_qq_adapter.py`：用伪造 AX 节点（role、description、value、DOM class、pos、size、children）构树，覆盖：我方/对方判定；纯图片消息跳过；高度 ≤ 1 节点丢弃；发送者取自头像；标题取编辑器描述并回退窗口标题；指纹相同 → `unchanged`、正文变化 → 指纹变化；拒绝无编辑器的会话列表窗口；超过 12 条只保留最新且按 y 排序。
 - `tests/test_registry.py`：按 bundle id 命中、按名字命中、其他 App 返回 None、查询异常返回 None。
-- 微信现有测试一行不改，必须全绿；`tests/test_hud_reply.py` 中涉及「微信」文案的断言改为 App 感知。
+- 截图识别路径现有测试一行不改，必须全绿；`tests/test_hud_reply.py` 中涉及「截图识别路径」文案的断言改为 App 感知。
 
 **真机验证（手工，证据看 `~/Library/Logs/jev-jarvis.log`，日志不含正文）：**
 
 1. `uv run python probe/qq_ax_probe.py`：复核第 2 节三个待复核项。
 2. `uv run python src/apps/qq.py`：QQ 聊天窗口在屏幕上时打印标题、消息方向与耗时。
 3. `./start.command`，QQ 前台：消息出现 → 判断 → 候选上屏 → 一键填入（不发送）。
-4. 切到微信：同一轮流程仍正常；切到 Chrome：面板隐藏。
+4. 切到截图识别路径：同一轮流程仍正常；切到 Chrome：面板隐藏。
 
 ## 6. 文件清单
 

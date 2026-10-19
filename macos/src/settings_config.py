@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import re
 import shlex
+import socket
+import ssl
 import tempfile
 import urllib.error
 import urllib.parse
@@ -161,11 +163,27 @@ def test_connection(prefix: str, base: str, key: str, model: str, extra: dict | 
 
 
 def error_message(error: Exception) -> str:
-    """Never display raw remote bodies, URLs or exception strings containing credentials."""
+    """Never display raw remote bodies, URLs or exception strings containing credentials.
+
+    网络类故障按层细分（#116：此前 DNS/拒绝/超时/TLS 全折叠成一句「连接失败或超时」，
+    用户无从定位——最常见的是网络环境需要代理，而连接池走 http.client 直连、不读
+    系统代理，浏览器可达 ≠ 应用可达）。文案只给类别与可行动提示，绝不回显 URL/密钥。
+    """
     if isinstance(error, urllib.error.HTTPError):
         return f"HTTP {error.code}：请检查地址、密钥及模型权限。"
     if isinstance(error, ThinkingOnlyError):
         return "模型只返回了思考内容，没有正文；请关闭思考模式或更换模型。"
+    reason = getattr(error, "reason", error)
+    if isinstance(reason, socket.gaierror):
+        return "域名解析失败：请检查服务地址拼写与本机 DNS（换 114.114.114.114 等公共 DNS 可辅助判断）。"
+    if isinstance(reason, ConnectionRefusedError):
+        return "连接被拒绝：服务地址端口不通，或被本机防火墙/安全软件拦截。"
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return ("连接超时（30 秒无响应）。注意：应用为直连、不走系统代理——"
+                "若你的网络需要代理（公司网/代理工具），浏览器可达不代表应用可达，"
+                "请让该域名可直连或在网络层放行后重试。")
+    if isinstance(reason, (ssl.SSLError, ssl.SSLCertVerificationError)):
+        return "TLS 证书验证失败：请检查系统时间是否正确、网络是否存在劫持。"
     if isinstance(error, (TimeoutError, OSError, http.client.HTTPException)):
-        return "连接失败或超时，请检查服务地址和网络。"
+        return "连接失败：请检查服务地址与网络连通性。"
     return "请求未得到有效结果，请检查地址、模型及服务是否支持该接口。"

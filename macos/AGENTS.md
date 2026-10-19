@@ -15,12 +15,12 @@
   ```
 
 - 日志：`~/Library/Logs/jev-jarvis.log`，分阶段耗时（读屏/生成/端到端；判断跟候选是同一次调用，没有自己的耗时，只有一行「判断 → …」报结论；排序是本地即时排的，也不单独计时）。**刻意不含消息正文与候选文字**（用户可放心贴 issue），只在事件发生时打、不在每跳打；首次调用标注「首次」。
-- 发版：版本号只有 `pyproject.toml` 一处；两条等价路径——推 tag（`git tag vX.Y.Z && git push origin vX.Y.Z`，须与 pyproject 版本一致，Release workflow 在 CI 自动构建+发布）或本地 `./packaging/release.sh --publish` 从**干净 worktree** 构建（zip 解压回验+SHA256+gh release）；无 Apple 公证，首次打开要教右键。资产命名统一 `jev-jarvis-macos-` 前缀：版本包 `jev-jarvis-macos-v<版本>.zip`、稳定名 `jev-jarvis-macos-latest.zip`（README 下载链接靠它，改名必须三处同步：release.sh + README + 当期 release notes）。公告草稿：Release Drafter 随 master push 自动按 PR 标签维护 draft，发版时对照校对（draft 实际可能不存在，#121 发版日实测——缺失就手写）。**发版前必核验 README 口径**：当版用户可见行为/数字的变化逐项同步进 README（功能描述、平台支持表、话术数量、已知限制、下一步清单），过时措辞（如「fork 实验分支」「本分支」「个人截图不随代码提交」这类时效句）当版清掉；公告两件套 `docs/release-notes-vX.Y.Z.md`（GitHub Release 正文源，图用相对路径，发 release 时换 raw 链接）+ 对应图文宣传稿（命名对齐 `docs/` 内既有文件）随发版产出，口径以核对后的 README 为准，不另编数字。
+- 发版：版本号只有 `pyproject.toml` 一处，**改完必须 `uv lock`**——uv.lock 也记录版本号，CI 的 `uv run --locked` 校验不同步直接红灯（0.6.1 实测：tag 已发、master CI 连红三个 commit）；两条等价路径——推 tag（`git tag vX.Y.Z && git push origin vX.Y.Z`，须与 pyproject 版本一致，Release workflow 在 CI 自动构建+发布）或本地 `./packaging/release.sh --publish` 从**干净 worktree** 构建（zip 解压回验+SHA256+gh release）；无 Apple 公证，首次打开要教右键。资产命名统一 `jev-jarvis-macos-` 前缀：版本包 `jev-jarvis-macos-v<版本>.zip`、稳定名 `jev-jarvis-macos-latest.zip`（README 下载链接靠它，改名必须三处同步：release.sh + README + 当期 release notes）。公告草稿：Release Drafter 随 master push 自动按 PR 标签维护 draft，发版时对照校对（draft 实际可能不存在，#121 发版日实测——缺失就手写）。**发版前必核验 README 口径**：当版用户可见行为/数字的变化逐项同步进 README（功能描述、平台支持表、话术数量、已知限制、下一步清单），过时措辞（如「fork 实验分支」「本分支」「个人截图不随代码提交」这类时效句）当版清掉；公告两件套 `docs/release-notes-vX.Y.Z.md`（GitHub Release 正文源，图用相对路径，发 release 时换 raw 链接）+ 对应图文宣传稿（命名对齐 `docs/` 内既有文件）随发版产出，口径以核对后的 README 为准，不另编数字。**Homebrew tap**：上游的 `release.sh --publish` 发完版会接着更新并推送它自己的 tap（`jev-chat/homebrew-tap` 的 `Casks/jev-jarvis.rb`），那个 cask 装的是上游原版。这一版没有 tap，`packaging/release.sh` 里那一段删了，发版不碰任何 tap。
 - 认领协议：动任何 issue 的代码前，先按 [CONTRIBUTING.md](CONTRIBUTING.md) 完成认领三步自检 + 评论认领 + 设 assignee——多人多 AI 并行扫 issue，不认领必撞车。
 
 ## 架构与硬约束
 
-- **纯只读**：不注入、不 hook、不解密聊天数据。「填入」是唯一写动作：AX 写入优先；目标应用不提供 AX 输入控件时（如部分环境），显式点击「填入」走 `visual_fill` 视觉兼容路径——点击输入区 + CGEvent 键盘事件，**不发送、不用剪贴板/Cmd+V、不覆盖草稿、窗口/焦点/会话签名三重复核、OCR 读回确认、失败不自动重试**（README「输入区检测框与填入」）——**别改回剪贴板+模拟 Cmd+V**（切前台不可靠、覆盖剪贴板、失败会贴进别的应用，见 `src/fill.py` 顶部注释）。
+- **纯只读**：不注入、不 hook、不解密聊天数据。「填入」是唯一写动作：AX 写入优先；目标应用不提供 AX 输入控件时，fallback 是**复制到剪贴板 + 用户自己 ⌘V**（#139：`visual_fill` 的合成事件被截图型应用的账号风控识别为自动化，触发强制登出，已对该路径停用；合成事件出身可查，模拟平滑轨迹没用）——**别改回合成事件（visual_fill）也别改成模拟 Cmd+V**（前者触发风控见 #139；后者切前台不可靠、覆盖剪贴板、失败会贴进别的应用，见 `src/fill.py` 顶部注释）。
 - **轮询**：定时器 0.25s 触发，`_next_read_ts` 门控分三档——静止（指纹相同）跳过 OCR、0.25s 一跳；**变化后先 0.45s×3 跳**（burst 下一条尽快被发现），持续再动才回 1s。**未变化帧仍要跑停稳判定**（复用 `_last_full` 缓存），否则分析永远不触发。停稳 `SETTLE_S=1.2` 是防刷屏**上限不能删**；连续 `STABLE_READS` 跳安静最早 `EARLY_SETTLE_S` 可提前开闸。最小分析间隔 `MIN_GAP_S=2.0` 不能删（早跑命中路径本就免冷却）。
 - **生成早跑**（`_pregen_loop`，latest-wins 单个常驻线程）：消息一出现就先起一次生成调用，停稳门只消费「文本仍是最新」的那份结果（`_take_pregen` 核对话术是否还对得上；迟到/过期的由这一关挡掉）。判断和候选是**同一次调用**的产物（`src/generate.py`），不再是判断、生成各跑一条线，也不再有第二次单独的排序调用。候选**先上屏再排序**：流式边写边上屏（prob=None 显示「排序中」），整条回完带着分原位重排一次（`_rank_payload`）。
 - **分析在独立线程**（`_run_analysis` + `_analyzing` 防重入），别塞回 tick 线程——那会重新造成分析期间轮询停摆。
@@ -33,6 +33,8 @@
 ## 已知的坑
 
 - **CLI 进程里验不了感知层**：独立 shell 进程里 `CGWindowListCreateImage` 会被拒（静默退子进程路径、无指纹）。验证要么用合成 CGImage 测纯函数，要么起真应用看日志。
+- **目标应用 4.1.x 的防截屏灰度只封截图路径，AX 不受影响**（09-28 配对实测 sharing=0 时 AX 感知/输入框定位全通）：灰度按**登录会话**抽签、随时横跳，别把「今天能截」当稳定状态；读屏突然失灵先查窗口 sharing 再怀疑代码。AX 适配器是截图被封时的终局方案（感知通、填入通，9/26 实测）。
+- **测试用 .app 副本目录名不能带后缀**：CGWindowList 的 owner 名取自 .app 目录名，形如 `<App>-4.1.20-backup.app` 的副本会让窗口查找的精确匹配静默 miss——前台识别走 Info.plist 照常、读屏无任何日志直接失效（09-28 上午「识别不到窗口」即此因）。另：切换版本要先 pkill 该应用全家（含 helper），残留 helper 会把 `open` 劫持回 /Applications 版本。
 - **文本接口路径走 AX 不走 OCR**：CLI 进程里能直接验；改解析先跑 probe/ax_probe.py 看真实 class 名，再改 src/apps/ax_app.py 顶部常量。填入后备是键盘事件，同样不许改回剪贴板。
 - 坐标系：本模块布局常量（`CHAT_PANE_X_MIN` 等）是**底部原点**（Vision 口径）；`CGImageCreateWithImageInRect` 是**左上原点**，换算别搞反。
 - 生成层**不能用 thinking 模型**（思考吃光 `max_tokens`，候选 0 条，面板只报「生成失败」误导用户）。
@@ -42,3 +44,4 @@
 - AppKit 控件宽度要渲染成 PNG 实测，`cellSize()` 会谎报。
 - 首次调用偏慢是正常现象，别误判成回归：**这一版没有本地判断模型可预热**（那是上游 decider-2b 的坑），慢的是 Vision——OCR 首次加载比稳态贵约 2 倍，日志里首次那行会标注「首次」。
 - 改动用户可见行为要同步 README；待办与已定方案看 GitHub issues 和 README「下一步」。
+- **workflow 文件里步骤级 `env:` 键不能只留注释**：纯注释子节点解析为 `null`，GitHub 会以 `Invalid workflow file` 拒载整个 workflow（#137 评审拦下的）。pullfrog.yml 这类 dispatch 型 workflow 的改动 **PR 内 CI 绿验证不了**（定义取自 master），GitHub 侧的信号是 push 后 0 秒失败的占位 run；真正验证只能等合并后由下一个 dispatch 完成。

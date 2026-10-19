@@ -1,4 +1,10 @@
-"""Explicit-click fallback for WeChat versions without an AX text control.
+"""DEPRECATED for WeChat (#139): synthesized click/keystrokes read as automation to
+WeChat's risk control and got accounts force-logged out (2026-09-28, 4-5 reports).
+fill_text now copies to the pasteboard for a manual ⌘V instead. This module stays
+only for its read-only helpers (chat_signature / window_is_current, used by hud.py)
+and as a reference should a future non-WeChat adapter ever need a visual fallback.
+
+Explicit-click fallback for WeChat versions without an AX text control.
 
 Never sends Return, never touches the clipboard, and never clears existing drafts.
 Only used after the user clicks Fill, with a fresh visual target and window checks.
