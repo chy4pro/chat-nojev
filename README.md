@@ -21,13 +21,13 @@
 
 ## 快速开始
 
-三个变体各发了 `v0.2.0`，由仓库自己的 workflow 在 GitHub 的 runner 上编译、打包、发布，**没有一个在真机上跑过**——装之前先看一眼[用之前要知道的](#用之前要知道的)。
+三个变体各发了 `v0.3.0`，由仓库自己的 workflow 在 GitHub 的 runner 上编译、打包、发布，**没有一个在真机上跑过**——装之前先看一眼[用之前要知道的](#用之前要知道的)。
 
-`v0.2.0` 这三个包是 2026-09-26 的代码，对应 jev-chat-windows v0.1.11、jev-chat-jarvis v1.4、jev-chat-jarvis-mac v0.6.0。源码在 2026-10-19 又同步到了 jev-chat-windows v0.1.12（韩文界面、KakaoTalk）、jev-chat-jarvis v1.7（WhatsApp 一对一、QQ 群聊修正）、jev-chat-jarvis-mac v0.6.2，还没有重新打包；对齐到哪个 commit 见 [`docs/UPSTREAM.md`](docs/UPSTREAM.md)。Releases 里的 `v0.1.0` 是 2026-09-22 建仓时的代码，别装那个。
+`v0.3.0` 对应 jev-chat 各自的最新版：jev-chat-windows v0.1.12（韩文界面、KakaoTalk）、jev-chat-jarvis v1.7（WhatsApp 一对一、QQ 群聊修正）、jev-chat-jarvis-mac v0.6.2（2026-10-19 同步，对齐到哪个 commit 见 [`docs/UPSTREAM.md`](docs/UPSTREAM.md)）。Releases 里更早的 `v0.2.0`、`v0.1.0` 是旧代码，别装那两个。
 
 ### Windows
 
-**[下载 windows-v0.2.0](https://github.com/chy4pro/chat-nojev/releases/tag/windows-v0.2.0)** —— `jev-chat-windows-v0.2.0.zip`（165.7 MB）。解压到一个固定目录，双击里面的 `jev-chat-windows.exe`。**这是 PyInstaller 的 onedir 打包，整个文件夹里带着离线 OCR 模型和 Qt，所以体积大；exe 没签名，SmartScreen 会拦一下，走「更多信息」→「仍要运行」。**
+**[下载 windows-v0.3.0](https://github.com/chy4pro/chat-nojev/releases/tag/windows-v0.3.0)** —— `jev-chat-windows-v0.3.0.zip`（180.6 MB）。解压到一个固定目录，双击里面的 `jev-chat-windows.exe`。**这是 PyInstaller 的 onedir 打包，整个文件夹里带着离线 OCR 模型和 Qt，所以体积大；exe 没签名，SmartScreen 会拦一下，走「更多信息」→「仍要运行」。**
 
 要求 Windows 10 1903+ / 11、微信 Windows 4.x。首次启动弹设置页，「模型」卡片只有一节（原版是判断、起草两节）：填一把 OpenAI 兼容端点的 key，选你们的关系，保存。key 进 Windows 用户环境变量 `LLM_API_KEY`（注册表 `HKCU\Environment`），不落文件；其余设置写 `config.json`。
 
@@ -42,13 +42,15 @@ python main.py          # 自己打包：build.bat 或 pyinstaller --noconfirm -
 
 ### Android
 
-**[下载 android-v0.2.0](https://github.com/chy4pro/chat-nojev/releases/tag/android-v0.2.0)** —— `jev-chat-android-v0.2.0-unsigned.apk`（24.6 MB，另附 `.sha256`）。**这个 APK 没有签名，就装不上**——安卓要求每个包都带有效签名，这跟「允许未知来源」是两回事，任何来源都绕不过。自己签一次就行（自签即可，`keytool` 生成一把）：
+**[下载 android-v0.3.0](https://github.com/chy4pro/chat-nojev/releases/tag/android-v0.3.0)** —— `jev-chat-android-v0.3.0-unsigned.apk`（24.6 MB，另附 `.sha256`）。**这个 APK 没有签名，就装不上**——安卓要求每个包都带有效签名，这跟「允许未知来源」是两回事，任何来源都绕不过。自己签一次就行（自签即可，`keytool` 生成一把）：
 
-`apksigner sign --ks 你的.jks --out signed.apk jev-chat-android-v0.2.0-unsigned.apk`
+`apksigner sign --ks 你的.jks --out signed.apk jev-chat-android-v0.3.0-unsigned.apk`
+
+**从 v0.2.0 升级**：要用签 v0.2.0 时那把 key 来签，才能覆盖安装（换了 key 只能先卸载）。装好后去系统设置把本 App 的无障碍服务**关掉再打开一次**——jev-chat-jarvis v1.5 起服务换了名字，不重开的话主页一直显示「无障碍没开」。
 
 装上之后：设置 →「接口」只有两张卡（模型 / 视觉），填「模型接口」一把 key 就能用，视觉留空自动继承它。权限还是原版那三项——无障碍、悬浮窗、自启动 + 省电无限制。
 
-**不支持微信**，跟着 jev-chat-jarvis v1.4：微信 8.0.52+ 对无障碍服务隐藏了消息正文，最近又对部分账号开了防截屏，读正文和截屏识别两条路都断了。适配的是 QQ / X / 飞书，其余 App 走悬浮球菜单里的「截屏识别一次」，进微信只弹一次提示。
+**不支持微信**，跟着 jev-chat-jarvis v1.4：微信 8.0.52+ 对无障碍服务隐藏了消息正文，最近又对部分账号开了防截屏，读正文和截屏识别两条路都断了。适配的是 QQ / X / 飞书，以及 WhatsApp 一对一聊天；其余 App 走悬浮球菜单里的「截屏识别一次」，进微信只弹一次提示。
 
 ```bash
 # 从源码打包
@@ -58,7 +60,7 @@ cd android
 
 ### macOS
 
-**[下载 macos-v0.2.0](https://github.com/chy4pro/chat-nojev/releases/tag/macos-v0.2.0)** —— `jev-jarvis-macos-v0.2.0.zip`（0.2 MB，同一个 Release 下还有别名 `jev-jarvis-macos-latest.zip` 和一份 `SHA256SUMS`；zip 这么小是因为它只是个启动器，首次运行再联网拉 Python 依赖，这是原版的设计）。**没有代码签名、也没有公证，Gatekeeper 第一次会拦下来**：右键（或按住 Control 点）→ 打开 → 再点一次「打开」；提示「已损坏」就 `xattr -d com.apple.quarantine /Applications/jev-jarvis.app`。构建 runner 是 Apple Silicon（arm64）。
+**[下载 macos-v0.3.0](https://github.com/chy4pro/chat-nojev/releases/tag/macos-v0.3.0)** —— `jev-jarvis-macos-v0.3.0.zip`（0.2 MB，同一个 Release 下还有别名 `jev-jarvis-macos-latest.zip` 和一份 `SHA256SUMS`；zip 这么小是因为它只是个启动器，首次运行再联网拉 Python 依赖，这是原版的设计）。**没有代码签名、也没有公证，Gatekeeper 第一次会拦下来**：右键（或按住 Control 点）→ 打开 → 再点一次「打开」；提示「已损坏」就 `xattr -d com.apple.quarantine /Applications/jev-jarvis.app`。构建 runner 是 Apple Silicon（arm64）。
 
 要求 macOS 13+，微信或 QQ 在运行，终端已授予「屏幕录制」；「填入」另需「辅助功能」。**必须自己配一把 key**：原版打包时带着它作者中转的共享 key，这一版没有，不配就不出候选。配置是一个 env 文件，只有一把 key：
 
@@ -77,7 +79,7 @@ cd macos && ./start.command   # 从源码跑；自己打包：packaging/build_ap
 
 ## 用之前要知道的
 
-- **没有一个变体在真实设备上跑过。** 这台机器上没有 Android SDK、没有 Mac、也没有能显示 PySide6 窗口的桌面；三个 `v0.2.0` 是 CI 打出来的，证明的只是「编译得过、打得出包」（macOS 那个在 Mac runner 上跑过原版的 271 条单测，全过）。谁装谁就是第一个试的人。
+- **没有一个变体在真实设备上跑过。** 这台机器上没有 Android SDK、没有 Mac、也没有能显示 PySide6 窗口的桌面；三个 `v0.3.0` 是 CI 打出来的，证明的只是「编译得过、打得出包」（macOS 那个在 Mac runner 上跑过原版的 293 条单测，全过）。谁装谁就是第一个试的人。
 - **发送键永远你自己按。** 程序只把选中的回复填进输入框，转账红包一律不碰。这是 jev-chat 的边界，这一版没有碰它，也同样没有在真机上验证过它。
 - **Android 这个包装在原版旁边，不是替换它。** 应用 id 是 `com.jev.probe.nojev`，启动器名字是「对话副驾」——为的就是能和 `jev-chat-jarvis` 装在同一台手机上对着比。
 - **macOS 丢了本地判断模型。** 原版的判断层可以完全在本机跑（`Mapika/decider-2b`，不要 key、不联网），合并之后判断和候选是同一次请求，这条路没有了。丢的主要是隐私，不是离线能力：生成端点指向本地 Ollama 时整条链路照样不出网，没有了的是「用云端端点写候选、同时让判断留在本机」这一种组合，而那是原版的默认配置。介意就用 [jev-chat-jarvis-mac](https://github.com/jev-chat/jev-chat-jarvis-mac)。
