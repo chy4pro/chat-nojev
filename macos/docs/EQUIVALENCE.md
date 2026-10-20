@@ -109,10 +109,12 @@ against a fake `self`, because `hud.py` cannot be imported without PyObjC.
 
     python tools/equivalence_check_macos.py --upstream /path/to/jev-chat-jarvis-mac
 
-Sixteen scenarios: eleven identical on every compared key, five with the divergences listed
-below, none failing. Negative controls confirm the harness bites: making the adapter clamp
-`risk` into 0..9 turns `risk_outside_its_range` red, and inverting the within-group sort key
-turns fifteen of the sixteen red.
+Seventeen scenarios (2026-10-19, against jev-chat-jarvis-mac `cbf6fe4`, v0.6.2 + 16): twelve
+identical on every compared key, five with the divergences listed below, none failing. Negative
+controls confirmed the harness bites when it had sixteen scenarios: making the adapter clamp
+`risk` into 0..9 turned `risk_outside_its_range` red, and inverting the within-group sort key
+turned fifteen of the sixteen red. Since then the seventeenth scenario
+(`one_tone_writes_nothing_usable`) was shown to go red when the empty-`replies` rule is removed.
 
 Upstream is driven at its **cloud** judge. The local decider-2b produces the same dict
 through the same `ACTION_MAP` lookup, but it needs torch and a 7 GB download; it is also the
@@ -138,8 +140,8 @@ merge that happens to favour this version.
   the producer's name; it must differ.
 - the panel's status line, which displays exactly that string.
 - the push sequence, reported separately (two `applyCandidates:` upstream, one here).
-- API call counts, reported separately: over the sixteen scenarios upstream makes 64 calls
-  (16 judgments, 15 rankings, 33 generations) and this version makes 33.
+- API call counts, reported separately: over the seventeen scenarios upstream makes 68 calls
+  (17 judgments, 16 rankings, 35 generations) and this version makes 35.
 
 `int` versus `float` differences are reported but not counted: upstream's `float(risk)` makes
 `4` into `4.0`, and the adapter does not coerce, so an integer stays an integer.

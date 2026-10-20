@@ -60,7 +60,7 @@ HTTP call inside `core/llm.py`, so its real parser and adapter run on a raw mode
 
     python tools/equivalence_check.py --upstream /path/to/jev-chat-windows
 
-Fifteen scenarios, **all fifteen identical on every key except `usage`**, none failing. A
+Sixteen scenarios (2026-10-19, against jev-chat-windows `c6d3a10`, v0.1.12), **all sixteen identical on every key except `usage`**, none failing. A
 negative control confirms the harness bites: inverting `_REPLY_IDX` turns fourteen of the
 fifteen red.
 

@@ -245,7 +245,16 @@ open class ChatCaptureService : AccessibilityService() {
             .registerOnSharedPreferenceChangeListener(preferencesListener)
         overlay = OverlayController(this)
         overlay?.onManualAnalyze = {
-            currentSnapshot?.let { pendingSnapshot = it; runAnalysis() }
+            // chat-nojev: the button used to do nothing at all when it could not run
+            // (no messages read yet, or a round already in flight), which reads as a
+            // crash. Say why instead. Automatic rounds still go through runAnalysis()
+            // silently; only the button the user pressed answers back.
+            val snapshot = currentSnapshot
+            when {
+                snapshot == null -> overlay?.toast("还没读到这个聊天的消息。先打开一个聊天，或用菜单里的「截屏识别一次」")
+                analyzing -> overlay?.toast("正在分析，稍等")
+                else -> { pendingSnapshot = snapshot; runAnalysis() }
+            }
         }
         overlay?.onRegenerate = { regenerateReplies() }
         // Bubble menu: file the open conversation as a knowledge-base contact.
